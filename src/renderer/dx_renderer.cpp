@@ -6,6 +6,9 @@ bool DxRenderer::Initialize(HWND hwnd, const std::wstring& fontName, float fontS
     m_hwnd = hwnd;
     m_fontName = fontName;
     m_fontSize = fontSize;
+    m_dpi = GetDpiForWindow(hwnd);
+    if (m_dpi == 0)
+        m_dpi = 96;
     SetBackgroundColor(bgColor);
     InitPalette();
 
@@ -18,16 +21,7 @@ bool DxRenderer::Initialize(HWND hwnd, const std::wstring& fontName, float fontS
                              reinterpret_cast<IUnknown**>(m_pDWriteFactory.GetAddressOf()));
     if (FAILED(hr)) return false;
 
-    hr = m_pDWriteFactory->CreateTextFormat(
-        m_fontName.c_str(), nullptr,
-        DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STYLE_NORMAL,
-        DWRITE_FONT_STRETCH_NORMAL, m_fontSize, L"en-US",
-        m_pTextFormat.GetAddressOf());
-    if (FAILED(hr)) return false;
-
-    m_pTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-    m_pTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-    m_pTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    if (!RecreateTextFormat()) return false;
 
     if (!MeasureCellSize()) return false;
     if (!CreateDeviceResources()) return false;
@@ -35,23 +29,44 @@ bool DxRenderer::Initialize(HWND hwnd, const std::wstring& fontName, float fontS
     return true;
 }
 
+bool DxRenderer::SetDpi(UINT dpi) {
+    if (dpi == 0)
+        dpi = 96;
+    if (m_dpi == dpi)
+        return true;
+
+    m_dpi = dpi;
+    if (!RecreateTextFormat())
+        return false;
+    return MeasureCellSize();
+}
+
 bool DxRenderer::UpdateFont(const std::wstring& fontName, float fontSize) {
     m_fontName = fontName;
     m_fontSize = fontSize;
 
+    if (!RecreateTextFormat())
+        return false;
+    return MeasureCellSize();
+}
+
+bool DxRenderer::RecreateTextFormat() {
+    if (!m_pDWriteFactory)
+        return false;
+
     m_pTextFormat.Reset();
+    const float scaledFontSize = m_fontSize * (static_cast<float>(m_dpi) / 96.0f);
     HRESULT hr = m_pDWriteFactory->CreateTextFormat(
         m_fontName.c_str(), nullptr,
         DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STYLE_NORMAL,
-        DWRITE_FONT_STRETCH_NORMAL, m_fontSize, L"en-US",
+        DWRITE_FONT_STRETCH_NORMAL, scaledFontSize, L"en-US",
         m_pTextFormat.GetAddressOf());
     if (FAILED(hr)) return false;
 
     m_pTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     m_pTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     m_pTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-
-    return MeasureCellSize();
+    return true;
 }
 
 void DxRenderer::SetBackgroundColor(uint32_t rgb) {
@@ -111,12 +126,16 @@ bool DxRenderer::CreateDeviceResources() {
     m_height = rc.bottom - rc.top;
 
     D2D1_SIZE_U size = D2D1::SizeU(m_width, m_height);
+    D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties();
+    properties.dpiX = 96.0f;
+    properties.dpiY = 96.0f;
     HRESULT hr = m_pFactory->CreateHwndRenderTarget(
-        D2D1::RenderTargetProperties(),
+        properties,
         D2D1::HwndRenderTargetProperties(m_hwnd, size),
         m_pRenderTarget.GetAddressOf());
     if (FAILED(hr)) return false;
 
+    m_pRenderTarget->SetDpi(96.0f, 96.0f);
     m_pRenderTarget->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
 
     hr = m_pRenderTarget->CreateSolidColorBrush(

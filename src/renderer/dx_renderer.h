@@ -16,6 +16,7 @@ public:
 
     bool Initialize(HWND hwnd, const std::wstring& fontName = L"Consolas",
                     float fontSize = 14.0f, uint32_t bgColor = 0x1E1E1E);
+    bool SetDpi(UINT dpi);
     bool UpdateFont(const std::wstring& fontName, float fontSize);
     void SetBackgroundColor(uint32_t rgb);
     void Resize(UINT width, UINT height);
@@ -66,6 +67,7 @@ public:
 private:
     bool CreateDeviceResources();
     void DiscardDeviceResources();
+    bool RecreateTextFormat();
     bool MeasureCellSize();
     float MeasureTextWidth(const std::wstring& text) const;
     void InitPalette();
@@ -80,6 +82,7 @@ private:
     float m_cellHeight = 0;
     float m_fontSize = 14.0f;
     float m_baseline = 0;
+    UINT m_dpi = 96;
     std::wstring m_fontName = L"Consolas";
 
     ComPtr<ID2D1Factory> m_pFactory;

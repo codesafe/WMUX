@@ -35,11 +35,13 @@ private:
     void OnLButtonUp();
     void OnRButtonUp(int x, int y);
     void OnPtyOutput(WPARAM wParam, LPARAM lParam);
+    void OnDpiChanged(UINT dpi, const RECT& suggestedRect);
 
     void SplitActivePane(SplitDirection dir);
     void CloseActivePane();
     void OpenSettings();
     void UpdateTitleBar();
+    void RelayoutPanes();
     void CopySelection();
     void PasteClipboard();
     void ClearSelection();
