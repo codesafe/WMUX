@@ -44,6 +44,7 @@ public:
     void RenderZoomBorder(float width, float height);
     void RenderPrefixIndicator();
     void RenderPrefixOverlay(const std::wstring& text);
+    void RenderHelpPopup(int scrollOffset);
     void EndFrame();
 
     float GetStatusBarHeight() const { return m_cellHeight + 4.0f; }
@@ -53,6 +54,14 @@ public:
     float GetCellWidth() const { return m_cellWidth; }
     float GetCellHeight() const { return m_cellHeight; }
     static constexpr float GetPanePadding() { return 4.0f; }
+
+    // Help popup constants
+    static constexpr float HELP_POPUP_WIDTH = 700.0f;
+    static constexpr int HELP_TOTAL_LINES = 47;
+    static constexpr int HELP_VISIBLE_LINES = 20;
+    static constexpr float HELP_POPUP_PADDING = 20.0f;
+    static constexpr float HELP_SCROLLBAR_WIDTH = 8.0f;
+    static constexpr float HELP_DRAG_SENSITIVITY = 8.0f;  // pixels per line
 
 private:
     bool CreateDeviceResources();

@@ -233,22 +233,40 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         int mx = static_cast<int>(static_cast<short>(LOWORD(lParam)));
         int my = static_cast<int>(static_cast<short>(HIWORD(lParam)));
 
-        if (m_draggingSeparator || m_draggingScrollbar || m_selecting) {
+        if (m_draggingHelpScrollbar || m_draggingSeparator || m_draggingScrollbar || m_selecting) {
             OnMouseMove(mx, my);
         } else {
-            // Update cursor when hovering over separator or scrollbar
-            SplitNode* node = nullptr;
-            Pane* pane = nullptr;
-            D2D1_RECT_F rect = {};
-            if (HitTestSeparator(static_cast<float>(mx), static_cast<float>(my), node)) {
-                if (node->direction == SplitDirection::Vertical)
-                    SetCursor(LoadCursor(nullptr, IDC_SIZEWE));
-                else
-                    SetCursor(LoadCursor(nullptr, IDC_SIZENS));
-            } else if (HitTestScrollbar(static_cast<float>(mx), static_cast<float>(my), pane, rect)) {
-                SetCursor(LoadCursor(nullptr, IDC_ARROW));
+            // Update cursor when hovering over help popup or separator or scrollbar
+            if (m_showHelp) {
+                RECT rc;
+                GetClientRect(m_hwnd, &rc);
+                float lineHeight = m_renderer.GetCellHeight();
+                float visibleHeight = lineHeight * DxRenderer::HELP_VISIBLE_LINES;
+                float popupHeight = visibleHeight + DxRenderer::HELP_POPUP_PADDING * 2.0f;
+                float left = (static_cast<float>(rc.right) - DxRenderer::HELP_POPUP_WIDTH) * 0.5f;
+                float top = (static_cast<float>(rc.bottom) - popupHeight) * 0.5f;
+                D2D1_RECT_F popupRect = {left, top, left + DxRenderer::HELP_POPUP_WIDTH, top + popupHeight};
+
+                if (mx >= popupRect.left && mx <= popupRect.right &&
+                    my >= popupRect.top && my <= popupRect.bottom) {
+                    SetCursor(LoadCursor(nullptr, IDC_ARROW));
+                } else {
+                    SetCursor(LoadCursor(nullptr, IDC_ARROW));
+                }
             } else {
-                SetCursor(LoadCursor(nullptr, IDC_IBEAM));
+                SplitNode* node = nullptr;
+                Pane* pane = nullptr;
+                D2D1_RECT_F rect = {};
+                if (HitTestSeparator(static_cast<float>(mx), static_cast<float>(my), node)) {
+                    if (node->direction == SplitDirection::Vertical)
+                        SetCursor(LoadCursor(nullptr, IDC_SIZEWE));
+                    else
+                        SetCursor(LoadCursor(nullptr, IDC_SIZENS));
+                } else if (HitTestScrollbar(static_cast<float>(mx), static_cast<float>(my), pane, rect)) {
+                    SetCursor(LoadCursor(nullptr, IDC_ARROW));
+                } else {
+                    SetCursor(LoadCursor(nullptr, IDC_IBEAM));
+                }
             }
         }
         return 0;
@@ -256,7 +274,7 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_LBUTTONUP:
         RegisterUserActivity();
-        if (m_draggingSeparator || m_draggingScrollbar || m_selecting)
+        if (m_draggingHelpScrollbar || m_draggingSeparator || m_draggingScrollbar || m_selecting)
             OnLButtonUp();
         return 0;
 
@@ -690,6 +708,11 @@ void App::OnPaint() {
         m_renderer.RenderPrefixOverlay(L"V vertical  H horizontal  X close  Z zoom  O settings  Esc cancel");
     }
 
+    // Render help popup if showing
+    if (m_showHelp) {
+        m_renderer.RenderHelpPopup(m_helpScrollOffset);
+    }
+
     m_renderer.EndFrame();
 }
 
@@ -707,6 +730,26 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
     bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+
+    // Alt+H: Toggle help popup (always allowed)
+    if (alt && vk == 'H') {
+        m_showHelp = !m_showHelp;
+        m_helpScrollOffset = 0;
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+        return true;
+    }
+
+    // ESC: Close help popup if showing
+    if (vk == VK_ESCAPE && m_showHelp) {
+        m_showHelp = false;
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+        return true;
+    }
+
+    // Block all other keyboard input when help is showing
+    if (m_showHelp) {
+        return true;
+    }
 
     // Alt+Arrow: Move pane in direction (tree restructuring)
     // Alt+Shift+Arrow: Swap pane content with neighbor
@@ -1017,6 +1060,11 @@ void App::OnChar(wchar_t ch) {
         return;
     }
 
+    // Block all character input when help is showing
+    if (m_showHelp) {
+        return;
+    }
+
     // Ctrl+Shift combinations are wmux commands - never send to console
     bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -1165,6 +1213,19 @@ void App::OnPtyOutput(WPARAM wParam, LPARAM lParam) {
 
 void App::OnMouseWheel(WPARAM wParam, LPARAM lParam) {
     short delta = static_cast<short>(HIWORD(wParam));
+
+    // If help popup is showing, scroll the help content
+    if (m_showHelp) {
+        int steps = delta / WHEEL_DELTA;
+        m_helpScrollOffset -= steps * 3;
+
+        const int maxScroll = DxRenderer::HELP_TOTAL_LINES - DxRenderer::HELP_VISIBLE_LINES;
+        if (m_helpScrollOffset < 0) m_helpScrollOffset = 0;
+        if (m_helpScrollOffset > maxScroll) m_helpScrollOffset = maxScroll;
+
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+        return;
+    }
 
     // Screen coords → client coords
     POINT pt;
@@ -1323,6 +1384,11 @@ static bool IsWordChar(wchar_t ch) {
 }
 
 void App::OnLButtonDblClk(int x, int y) {
+    // Block double-click when help is showing
+    if (m_showHelp) {
+        return;
+    }
+
     ClearSelection();
     Pane* pane = nullptr;
     D2D1_RECT_F rect = {};
@@ -1388,6 +1454,38 @@ void App::OnLButtonDblClk(int x, int y) {
 void App::OnLButtonDown(int x, int y) {
     m_lastMouseX = x;
     m_lastMouseY = y;
+
+    // Help popup handling (highest priority when showing)
+    if (m_showHelp) {
+        RECT rc;
+        GetClientRect(m_hwnd, &rc);
+
+        float lineHeight = m_renderer.GetCellHeight();
+        float visibleHeight = lineHeight * DxRenderer::HELP_VISIBLE_LINES;
+        float popupHeight = visibleHeight + DxRenderer::HELP_POPUP_PADDING * 2.0f;
+        float left = (static_cast<float>(rc.right) - DxRenderer::HELP_POPUP_WIDTH) * 0.5f;
+        float top = (static_cast<float>(rc.bottom) - popupHeight) * 0.5f;
+
+        D2D1_RECT_F popupRect = {left, top, left + DxRenderer::HELP_POPUP_WIDTH, top + popupHeight};
+
+        // Check if click is inside popup
+        if (x >= popupRect.left && x <= popupRect.right &&
+            y >= popupRect.top && y <= popupRect.bottom) {
+
+            // Start dragging anywhere inside popup to scroll
+            m_draggingHelpScrollbar = true;
+            m_helpDragStartY = static_cast<float>(y);
+            m_helpScrollOffsetAtDragStart = m_helpScrollOffset;
+            SetCapture(m_hwnd);
+            return;
+        } else {
+            // Click outside popup - close help
+            m_showHelp = false;
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+            return;
+        }
+    }
+
     // Separator drag (highest priority)
     SplitNode* splitNode = nullptr;
     if (HitTestSeparator(static_cast<float>(x), static_cast<float>(y), splitNode)) {
@@ -1441,7 +1539,17 @@ void App::OnLButtonDown(int x, int y) {
 void App::OnMouseMove(int x, int y) {
     m_lastMouseX = x;
     m_lastMouseY = y;
-    if (m_draggingSeparator) {
+    if (m_draggingHelpScrollbar) {
+        const int maxScroll = DxRenderer::HELP_TOTAL_LINES - DxRenderer::HELP_VISIBLE_LINES;
+        float deltaY = static_cast<float>(y) - m_helpDragStartY;
+        int scrollDelta = static_cast<int>(deltaY / DxRenderer::HELP_DRAG_SENSITIVITY);
+
+        m_helpScrollOffset = m_helpScrollOffsetAtDragStart + scrollDelta;
+        if (m_helpScrollOffset < 0) m_helpScrollOffset = 0;
+        if (m_helpScrollOffset > maxScroll) m_helpScrollOffset = maxScroll;
+
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+    } else if (m_draggingSeparator) {
         ApplySeparatorDrag(x, y);
         InvalidateRect(m_hwnd, nullptr, FALSE);
     } else if (m_draggingScrollbar) {
@@ -1457,7 +1565,10 @@ void App::OnMouseMove(int x, int y) {
 }
 
 void App::OnLButtonUp() {
-    if (m_draggingSeparator) {
+    if (m_draggingHelpScrollbar) {
+        m_draggingHelpScrollbar = false;
+        ReleaseCapture();
+    } else if (m_draggingSeparator) {
         m_draggingSeparator = false;
         m_dragSplitNode = nullptr;
         ReleaseCapture();
@@ -1476,6 +1587,11 @@ void App::OnLButtonUp() {
 }
 
 void App::OnRButtonUp(int x, int y) {
+    // Block right-click when help is showing
+    if (m_showHelp) {
+        return;
+    }
+
     Pane* pane = nullptr;
     D2D1_RECT_F rect = {};
     if (m_paneManager.FindPaneAndRectAtPoint(static_cast<float>(x), static_cast<float>(y), pane, rect)) {

@@ -779,6 +779,156 @@ void DxRenderer::RenderZoomBorder(float width, float height) {
     m_pRenderTarget->FillRectangle({width - borderWidth, 0, width, height}, m_pBrush.Get());
 }
 
+void DxRenderer::RenderHelpPopup(int scrollOffset) {
+    // Help content - key bindings organized by category
+    static const wchar_t* helpLines[] = {
+        L"wmux \uB2E8\uCD95\uD0A4 \uB3C4\uC6C0\uB9D0",
+        L"",
+        L"\u2501\u2501\u2501 Prefix \uBA85\uB839 (Ctrl+B \uD6C4) \u2501\u2501\u2501",
+        L"",
+        L"  % \uB610\uB294 v     \uC218\uC9C1 \uBD84\uD560 (\uC88C\uC6B0)",
+        L"  \" \uB610\uB294 h     \uC218\uD3C9 \uBD84\uD560 (\uC0C1\uD558)",
+        L"  x           \uD604\uC7AC pane \uB2EB\uAE30",
+        L"  z           \uC904 \uD1A0\uAE00 (\uC804\uCCB4\uD654\uBA74)",
+        L"  o           \uC124\uC815 \uB300\uD654\uC0C1\uC790",
+        L"  \uBC29\uD5A5\uD0A4       pane \uD3EC\uCEE4\uC2A4 \uC774\uB3D9",
+        L"  Ctrl+B      \uB9AC\uD130\uB7F4 Ctrl+B \uC804\uC1A1",
+        L"",
+        L"\u2501\u2501\u2501 \uC9C1\uC811 \uB2E8\uCD95\uD0A4 (prefix \uBD88\uD544\uC694) \u2501\u2501\u2501",
+        L"",
+        L"  Ctrl+\uBC29\uD5A5\uD0A4    pane \uD3EC\uCEE4\uC2A4 \uC774\uB3D9",
+        L"  Alt+H         \uB3C4\uC6C0\uB9D0 \uD31D\uC5C5 \uD1A0\uAE00",
+        L"  Alt+\uBC29\uD5A5\uD0A4     pane \uC774\uB3D9 (\uD2B8\uB9AC \uC7AC\uAD6C\uC131)",
+        L"  Alt+Shift+\uBC29\uD5A5\uD0A4  pane \uB0B4\uC6A9 \uAD50\uD658",
+        L"  Shift+\uBC29\uD5A5\uD0A4   \uD14D\uC2A4\uD2B8 \uC120\uD0DD \uD655\uC7A5",
+        L"  Ctrl+A        \uC804\uCCB4 \uC120\uD0DD",
+        L"  Ctrl+C        \uC120\uD0DD \uBCF5\uC0AC (\uC120\uD0DD \uC5C6\uC73C\uBA74 SIGINT)",
+        L"  Ctrl+V        \uBD99\uC5EC\uB123\uAE30",
+        L"  Shift+PageUp  \uC2A4\uD06C\uB864\uBC31 \uC704\uB85C (\uBC18\uD398\uC774\uC9C0)",
+        L"  Shift+PageDown  \uC2A4\uD06C\uB864\uBC31 \uC544\uB798\uB85C (\uBC18\uD398\uC774\uC9C0)",
+        L"",
+        L"\u2501\u2501\u2501 \uB9C8\uC6B0\uC2A4 \u2501\u2501\u2501",
+        L"",
+        L"  \uC88C\uD074\uB9AD \uB4DC\uB798\uADF8   \uD14D\uC2A4\uD2B8 \uC601\uC5ED \uC120\uD0DD (pane \uD65C\uC131\uD654)",
+        L"  \uB354\uBE14\uD074\uB9AD       \uB2E8\uC5B4 \uC120\uD0DD",
+        L"  \uC6B0\uD074\uB9AD         \uC120\uD0DD \uC788\uC73C\uBA74 \uBCF5\uC0AC, \uC5C6\uC73C\uBA74 \uBD99\uC5EC\uB123\uAE30",
+        L"  \uB9C8\uC6B0\uC2A4 \uD720      \uC2A4\uD06C\uB864\uBC31 (\uCEE4\uC11C \uC704\uCE58 pane)",
+        L"  \uC2A4\uD06C\uB864\uBC14 \uB4DC\uB798\uADF8  \uC2A4\uD06C\uB864 \uC704\uCE58 \uC9C1\uC811 \uC870\uC815",
+        L"  \uBD84\uD560\uC120 \uB4DC\uB798\uADF8   pane \uD06C\uAE30 \uBE44\uC728 \uC870\uC808",
+        L"",
+        L"\u2501\u2501\u2501 \uD2B9\uC218 \uD0A4 \u2501\u2501\u2501",
+        L"",
+        L"  F1-F4        ESC OP ~ ESC OS",
+        L"  F5-F12       ESC [15~ ~ ESC [24~",
+        L"  \uBC29\uD5A5\uD0A4        ESC [A/B/C/D (\uB610\uB294 ESC OA/B/C/D)",
+        L"  Home/End     ESC [H / ESC [F",
+        L"  Insert/Delete  ESC [2~ / ESC [3~",
+        L"  PageUp/PageDown  ESC [5~ / ESC [6~",
+        L"  Backspace    0x7F (DEL)",
+        L"",
+        L"ESC \uD0A4\uB97C \uB20C\uB7EC \uB2EB\uAE30",
+    };
+    constexpr int totalLines = sizeof(helpLines) / sizeof(helpLines[0]);
+
+    float lineHeight = m_cellHeight;
+    float visibleHeight = lineHeight * HELP_VISIBLE_LINES;
+    float popupHeight = visibleHeight + HELP_POPUP_PADDING * 2.0f;
+
+    float left = (static_cast<float>(m_width) - HELP_POPUP_WIDTH) * 0.5f;
+    float top = (static_cast<float>(m_height) - popupHeight) * 0.5f;
+    D2D1_RECT_F popupRect = {left, top, left + HELP_POPUP_WIDTH, top + popupHeight};
+
+    // Semi-transparent background
+    m_pBrush->SetColor(D2D1::ColorF(0.05f, 0.05f, 0.10f, 0.95f));
+    m_pRenderTarget->FillRectangle(popupRect, m_pBrush.Get());
+
+    // Green border
+    m_pBrush->SetColor(D2D1::ColorF(0x16C60C));
+    m_pRenderTarget->DrawRectangle(popupRect, m_pBrush.Get(), 2.0f);
+
+    // Scrollable content area
+    D2D1_RECT_F contentRect = {
+        popupRect.left + HELP_POPUP_PADDING,
+        popupRect.top + HELP_POPUP_PADDING,
+        popupRect.right - HELP_POPUP_PADDING,
+        popupRect.bottom - HELP_POPUP_PADDING
+    };
+
+    m_pRenderTarget->PushAxisAlignedClip(contentRect, D2D1_ANTIALIAS_MODE_ALIASED);
+
+    // Render help lines with scroll offset
+    float y = contentRect.top - (scrollOffset * lineHeight);
+    for (int i = 0; i < totalLines; i++) {
+        if (y + lineHeight < contentRect.top) {
+            y += lineHeight;
+            continue;  // Skip lines above visible area
+        }
+        if (y > contentRect.bottom) {
+            break;  // Stop rendering below visible area
+        }
+
+        // Color based on line type
+        if (wcsstr(helpLines[i], L"\u2501\u2501\u2501") != nullptr) {
+            // Section header
+            m_pBrush->SetColor(D2D1::ColorF(0xF9F1A5));  // Yellow
+        } else if (wcslen(helpLines[i]) == 0) {
+            // Empty line - skip
+            y += lineHeight;
+            continue;
+        } else if (wcsstr(helpLines[i], L"wmux") != nullptr) {
+            // Title
+            m_pBrush->SetColor(D2D1::ColorF(0x16C60C));  // Green
+        } else if (wcsstr(helpLines[i], L"ESC") != nullptr && wcsstr(helpLines[i], L"\uB2EB\uAE30") != nullptr) {
+            // Close instruction
+            m_pBrush->SetColor(D2D1::ColorF(0xFF6B6B));  // Red
+        } else {
+            // Normal text
+            m_pBrush->SetColor(D2D1::ColorF(0xE8E8E8));  // Light gray
+        }
+
+        D2D1_RECT_F textRect = {contentRect.left, y, contentRect.right, y + lineHeight};
+        m_pRenderTarget->DrawText(
+            helpLines[i],
+            static_cast<UINT32>(wcslen(helpLines[i])),
+            m_pTextFormat.Get(),
+            textRect,
+            m_pBrush.Get(),
+            D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT
+        );
+
+        y += lineHeight;
+    }
+
+    m_pRenderTarget->PopAxisAlignedClip();
+
+    // Scrollbar
+    if (totalLines * lineHeight > visibleHeight) {
+        float scrollbarLeft = popupRect.right - HELP_POPUP_PADDING - HELP_SCROLLBAR_WIDTH;
+        float scrollbarTop = contentRect.top;
+
+        // Track
+        m_pBrush->SetColor(D2D1::ColorF(0.2f, 0.2f, 0.2f, 0.5f));
+        D2D1_RECT_F trackRect = {scrollbarLeft, scrollbarTop,
+                                  scrollbarLeft + HELP_SCROLLBAR_WIDTH,
+                                  scrollbarTop + visibleHeight};
+        m_pRenderTarget->FillRectangle(trackRect, m_pBrush.Get());
+
+        // Thumb
+        float contentHeight = totalLines * lineHeight;
+        float thumbHeight = (visibleHeight / contentHeight) * visibleHeight;
+        if (thumbHeight < 20.0f) thumbHeight = 20.0f;
+        float maxScroll = static_cast<float>(totalLines - HELP_VISIBLE_LINES);
+        if (maxScroll < 1.0f) maxScroll = 1.0f;
+        float thumbOffset = (scrollOffset / maxScroll) * (visibleHeight - thumbHeight);
+
+        m_pBrush->SetColor(D2D1::ColorF(0.5f, 0.5f, 0.5f, 0.8f));
+        D2D1_RECT_F thumbRect = {scrollbarLeft, scrollbarTop + thumbOffset,
+                                  scrollbarLeft + HELP_SCROLLBAR_WIDTH,
+                                  scrollbarTop + thumbOffset + thumbHeight};
+        m_pRenderTarget->FillRectangle(thumbRect, m_pBrush.Get());
+    }
+}
+
 void DxRenderer::InitPalette() {
     // Standard 16 colors (Windows Terminal inspired)
     m_palette[0]  = D2D1::ColorF(0x0C0C0C); // Black

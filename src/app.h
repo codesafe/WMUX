@@ -115,6 +115,13 @@ private:
     // Store scrambled cells: pane -> (documentRow, col) -> scrambled cell
     std::map<Pane*, std::map<std::pair<int, int>, Cell>> m_scrambledCells;
 
+    // Help popup state
+    bool m_showHelp = false;
+    int m_helpScrollOffset = 0;
+    bool m_draggingHelpScrollbar = false;
+    float m_helpDragStartY = 0;
+    int m_helpScrollOffsetAtDragStart = 0;
+
     static constexpr UINT WM_PTY_OUTPUT = WM_APP + 1;
     static constexpr UINT TIMER_CLOCK = 1;
     static constexpr UINT TIMER_PREFIX = 2;
