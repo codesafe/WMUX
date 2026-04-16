@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <memory>
+#include <map>
 #include "renderer/dx_renderer.h"
 #include "pane/pane_tree.h"
 #include "settings.h"
@@ -9,6 +10,7 @@
 class DropTarget;
 
 enum class InputMode { Normal, Prefix };
+enum class SelectionGranularity { Character, Word, Line };
 
 class App {
 public:
@@ -41,11 +43,29 @@ private:
     void CopySelection();
     void PasteClipboard();
     void ClearSelection();
+    void SelectAllVisible(Pane* pane);
+    void SelectLineAt(Pane* pane, int row);
+    void EnterPrefixMode();
+    void ExitPrefixMode();
+    void UpdateSelectionAutoScroll();
+    void ContinueSelectionAutoScroll();
+    void ApplyVisualSettings(const Settings& settings);
+    void RegisterUserActivity();
+    void UpdateIdleScrambleState();
+    void UpdateScrambledCells();
+    void UpdateDragSelection(int x, int y);
+    void ExpandWordSelection(Pane* pane, int viewRow, int col,
+                             int& startRow, int& startCol,
+                             int& endRow, int& endCol);
+    void ExpandLineSelection(Pane* pane, int viewRow,
+                             int& startRow, int& startCol,
+                             int& endRow, int& endCol);
+    void CancelMouseOperation();
 
     // Scrollbar drag helpers
     bool HitTestScrollbar(float px, float py, Pane*& outPane, D2D1_RECT_F& outRect);
     void ApplyScrollbarDrag(int mouseY);
-    void MouseToCell(int mx, int my, D2D1_RECT_F rect, int& row, int& col);
+    void MouseToCell(int mx, int my, Pane* pane, D2D1_RECT_F rect, int& row, int& col);
 
     // Separator drag helpers
     bool HitTestSeparator(float px, float py, SplitNode*& outNode);
@@ -58,7 +78,9 @@ private:
     PaneManager m_paneManager;
     InputMode m_inputMode = InputMode::Normal;
     Settings m_settings;
-    bool m_skipNextChar = false;  // Flag to skip WM_CHAR after handling in WM_KEYDOWN
+    // Skip next WM_CHAR if key was already handled in WM_KEYDOWN
+    // Auto-reset by TIMER_RESET_SKIP_FLAG if WM_CHAR is not delivered
+    bool m_skipNextChar = false;
 
     DropTarget* m_dropTarget = nullptr;
 
@@ -66,6 +88,7 @@ private:
     bool m_draggingScrollbar = false;
     Pane* m_dragPane = nullptr;
     D2D1_RECT_F m_dragPaneRect = {};
+    int m_wheelDeltaRemainder = 0;
 
     // Separator drag state
     bool m_draggingSeparator = false;
@@ -79,6 +102,24 @@ private:
     D2D1_RECT_F m_selectPaneRect = {};
     int m_selStartRow = 0, m_selStartCol = 0;
     int m_selEndRow = 0, m_selEndCol = 0;
+    int m_selAnchorStartRow = 0, m_selAnchorStartCol = 0;
+    int m_selAnchorEndRow = 0, m_selAnchorEndCol = 0;
+    SelectionGranularity m_selectionGranularity = SelectionGranularity::Character;
+    int m_lastMouseX = 0, m_lastMouseY = 0;
+    DWORD m_lastDblClickTick = 0;
+    int m_lastDblClickRow = -1;
+    Pane* m_lastDblClickPane = nullptr;
+    ULONGLONG m_lastUserInputTick = 0;
+    bool m_idleScrambleActive = false;
+    uint32_t m_idleScrambleFrame = 0;
+    // Store scrambled cells: pane -> (documentRow, col) -> scrambled cell
+    std::map<Pane*, std::map<std::pair<int, int>, Cell>> m_scrambledCells;
 
     static constexpr UINT WM_PTY_OUTPUT = WM_APP + 1;
+    static constexpr UINT TIMER_CLOCK = 1;
+    static constexpr UINT TIMER_PREFIX = 2;
+    static constexpr UINT TIMER_SELECTION_AUTOSCROLL = 3;
+    static constexpr UINT TIMER_IDLE_SCRAMBLE = 4;
+    static constexpr UINT TIMER_FLUSH_INPUT = 5;
+    static constexpr UINT TIMER_RESET_SKIP_FLAG = 6;
 };

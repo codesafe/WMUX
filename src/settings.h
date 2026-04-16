@@ -10,6 +10,10 @@ struct Settings {
     int windowHeight = 800;
     bool dimInactivePanes = true;  // Dim inactive panes by default
     uint32_t backgroundColor = 0x1E1E1E;  // RGB background color (default: dark gray)
+    int prefixTimeoutMs = 1500;
+    int scrollLines = 0;  // 0 = use system setting
+    int idleScrambleMinutes = 5;  // 0 = disabled
+    bool showPrefixOverlay = true;
 
     void Load();
     void Save() const;

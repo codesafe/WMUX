@@ -3,6 +3,7 @@
 #include "drop_target.h"
 #include <imm.h>
 #include <ole2.h>
+#include <shellapi.h>
 
 #pragma comment(lib, "imm32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -10,6 +11,8 @@
 #ifndef VK_PROCESSKEY
 #define VK_PROCESSKEY 0xE5
 #endif
+
+static bool IsWordChar(wchar_t ch);
 
 App::~App() {
     if (m_hwnd && m_dropTarget) {
@@ -32,13 +35,14 @@ bool App::Initialize(HINSTANCE hInstance, int nCmdShow) {
     wc.hCursor = LoadCursor(nullptr, IDC_IBEAM);
     wc.hbrBackground = nullptr;
     wc.lpszClassName = L"WmuxWindowClass";
-    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(101));  // IDI_WMUX
+    wc.hIconSm = LoadIcon(hInstance, MAKEINTRESOURCE(101));
 
     if (!RegisterClassExW(&wc))
         return false;
 
     m_hwnd = CreateWindowExW(
-        0, L"WmuxWindowClass", L"wmux",
+        0, L"WmuxWindowClass", L"WMUX",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
         m_settings.windowWidth, m_settings.windowHeight,
@@ -75,7 +79,10 @@ bool App::Initialize(HINSTANCE hInstance, int nCmdShow) {
     UpdateWindow(m_hwnd);
 
     // Timer for status bar clock update (1 second)
-    SetTimer(m_hwnd, 1, 1000, nullptr);
+    SetTimer(m_hwnd, TIMER_CLOCK, 1000, nullptr);
+    // Timer for flushing pending input (50ms)
+    SetTimer(m_hwnd, TIMER_FLUSH_INPUT, 50, nullptr);
+    m_lastUserInputTick = GetTickCount64();
 
     return true;
 }
@@ -126,11 +133,13 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
+        RegisterUserActivity();
         if (OnKeyDown(wParam, lParam))
             return 0;
         break;
 
     case WM_CHAR:
+        RegisterUserActivity();
         OnChar(static_cast<wchar_t>(wParam));
         return 0;
 
@@ -165,8 +174,7 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
                     if (cmd != 0) {
                         // Execute command directly
-                        m_inputMode = InputMode::Normal;
-                        UpdateTitleBar();
+                        ExitPrefixMode();
 
                         switch (cmd) {
                         case 'v':
@@ -204,20 +212,24 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         return DefWindowProc(m_hwnd, msg, wParam, lParam);
 
     case WM_MOUSEWHEEL:
+        RegisterUserActivity();
         OnMouseWheel(wParam, lParam);
         return 0;
 
     case WM_LBUTTONDOWN:
+        RegisterUserActivity();
         OnLButtonDown(static_cast<int>(static_cast<short>(LOWORD(lParam))),
                       static_cast<int>(static_cast<short>(HIWORD(lParam))));
         return 0;
 
     case WM_LBUTTONDBLCLK:
+        RegisterUserActivity();
         OnLButtonDblClk(static_cast<int>(static_cast<short>(LOWORD(lParam))),
                         static_cast<int>(static_cast<short>(HIWORD(lParam))));
         return 0;
 
     case WM_MOUSEMOVE: {
+        RegisterUserActivity();
         int mx = static_cast<int>(static_cast<short>(LOWORD(lParam)));
         int my = static_cast<int>(static_cast<short>(HIWORD(lParam)));
 
@@ -243,17 +255,46 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_LBUTTONUP:
+        RegisterUserActivity();
         if (m_draggingSeparator || m_draggingScrollbar || m_selecting)
             OnLButtonUp();
         return 0;
 
     case WM_RBUTTONUP:
+        RegisterUserActivity();
         OnRButtonUp(static_cast<int>(static_cast<short>(LOWORD(lParam))),
                     static_cast<int>(static_cast<short>(HIWORD(lParam))));
         return 0;
 
     case WM_TIMER:
-        InvalidateRect(m_hwnd, nullptr, FALSE);
+        if (wParam == TIMER_CLOCK) {
+            UpdateIdleScrambleState();
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+        } else if (wParam == TIMER_PREFIX) {
+            ExitPrefixMode();
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+        } else if (wParam == TIMER_SELECTION_AUTOSCROLL) {
+            ContinueSelectionAutoScroll();
+        } else if (wParam == TIMER_IDLE_SCRAMBLE) {
+            UpdateIdleScrambleState();
+            if (m_idleScrambleActive) {
+                m_idleScrambleFrame++;
+                UpdateScrambledCells();
+                InvalidateRect(m_hwnd, nullptr, FALSE);
+            }
+        } else if (wParam == TIMER_FLUSH_INPUT) {
+            // Try to flush pending input for all panes
+            m_paneManager.ForEachLeaf([](SplitNode& node) {
+                if (node.pane) {
+                    node.pane->TryFlushPendingInput();
+                }
+            });
+        } else if (wParam == TIMER_RESET_SKIP_FLAG) {
+            // Safety reset: if WM_CHAR wasn't delivered after setting m_skipNextChar,
+            // force reset to prevent next input from being skipped
+            KillTimer(m_hwnd, TIMER_RESET_SKIP_FLAG);
+            m_skipNextChar = false;
+        }
         return 0;
 
     case WM_PTY_OUTPUT:
@@ -261,6 +302,12 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
 
     case WM_CLOSE: {
+        KillTimer(m_hwnd, TIMER_CLOCK);
+        KillTimer(m_hwnd, TIMER_PREFIX);
+        KillTimer(m_hwnd, TIMER_SELECTION_AUTOSCROLL);
+        KillTimer(m_hwnd, TIMER_IDLE_SCRAMBLE);
+        KillTimer(m_hwnd, TIMER_FLUSH_INPUT);
+        KillTimer(m_hwnd, TIMER_RESET_SKIP_FLAG);
         // Save window size
         RECT wr;
         GetWindowRect(m_hwnd, &wr);
@@ -284,6 +331,228 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     return DefWindowProc(m_hwnd, msg, wParam, lParam);
+}
+
+void App::EnterPrefixMode() {
+    m_inputMode = InputMode::Prefix;
+    SetTimer(m_hwnd, TIMER_PREFIX, static_cast<UINT>(m_settings.prefixTimeoutMs), nullptr);
+    UpdateTitleBar();
+}
+
+void App::ExitPrefixMode() {
+    if (m_inputMode == InputMode::Prefix)
+        m_inputMode = InputMode::Normal;
+    KillTimer(m_hwnd, TIMER_PREFIX);
+    UpdateTitleBar();
+}
+
+void App::SelectAllVisible(Pane* pane) {
+    if (!pane) return;
+    auto& buf = pane->GetBuffer();
+    m_selectPane = pane;
+    m_paneManager.ForEachLeaf([&](SplitNode& node) {
+        if (node.pane.get() == pane)
+            m_selectPaneRect = node.rect;
+    });
+    m_selStartRow = buf.ViewRowToDocumentRow(0);
+    m_selStartCol = 0;
+    m_selEndRow = buf.ViewRowToDocumentRow(buf.GetRows() - 1);
+    m_selEndCol = buf.GetCols() - 1;
+    m_hasSelection = true;
+    m_selecting = false;
+}
+
+void App::SelectLineAt(Pane* pane, int row) {
+    if (!pane) return;
+    auto& buf = pane->GetBuffer();
+    if (row < 0) row = 0;
+    if (row >= buf.GetRows()) row = buf.GetRows() - 1;
+    if (row < 0) return;
+    int documentRow = buf.ViewRowToDocumentRow(row);
+
+    m_selectPane = pane;
+    m_paneManager.ForEachLeaf([&](SplitNode& node) {
+        if (node.pane.get() == pane)
+            m_selectPaneRect = node.rect;
+    });
+    m_selStartRow = documentRow;
+    m_selEndRow = documentRow;
+    m_selStartCol = 0;
+    m_selEndCol = buf.GetCols() - 1;
+    m_hasSelection = true;
+    m_selecting = false;
+}
+
+void App::ApplyVisualSettings(const Settings& settings) {
+    m_renderer.UpdateFont(settings.fontName, settings.fontSize);
+    m_renderer.SetBackgroundColor(settings.backgroundColor);
+    m_settings.fontName = settings.fontName;
+    m_settings.fontSize = settings.fontSize;
+    m_settings.backgroundColor = settings.backgroundColor;
+    m_settings.dimInactivePanes = settings.dimInactivePanes;
+    m_settings.showPrefixOverlay = settings.showPrefixOverlay;
+    m_settings.idleScrambleMinutes = settings.idleScrambleMinutes;
+    UpdateIdleScrambleState();
+
+    RECT rc;
+    GetClientRect(m_hwnd, &rc);
+    float statusH = m_renderer.GetStatusBarHeight();
+    D2D1_RECT_F paneRect = {0, 0, static_cast<float>(rc.right),
+                             static_cast<float>(rc.bottom) - statusH};
+    m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(),
+                           m_renderer.GetCellHeight());
+    InvalidateRect(m_hwnd, nullptr, FALSE);
+}
+
+void App::RegisterUserActivity() {
+    m_lastUserInputTick = GetTickCount64();
+    if (m_idleScrambleActive) {
+        m_idleScrambleActive = false;
+        // Clear scrambled cells to restore original state
+        m_scrambledCells.clear();
+        m_idleScrambleFrame = 0;
+        KillTimer(m_hwnd, TIMER_IDLE_SCRAMBLE);
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+    }
+}
+
+void App::UpdateIdleScrambleState() {
+    bool shouldEnable = false;
+    if (m_settings.idleScrambleMinutes > 0) {
+        ULONGLONG idleMs = static_cast<ULONGLONG>(m_settings.idleScrambleMinutes) * 60ull * 1000ull;
+        shouldEnable = (GetTickCount64() - m_lastUserInputTick) >= idleMs;
+    }
+
+    if (shouldEnable == m_idleScrambleActive)
+        return;
+
+    m_idleScrambleActive = shouldEnable;
+    if (m_idleScrambleActive) {
+        m_idleScrambleFrame = 0;
+        SetTimer(m_hwnd, TIMER_IDLE_SCRAMBLE, 120, nullptr);
+    } else {
+        KillTimer(m_hwnd, TIMER_IDLE_SCRAMBLE);
+    }
+}
+
+static bool IsScrambleCandidate(const Cell& cell) {
+    return cell.width > 0 && cell.ch != 0 && cell.ch != L' ';
+}
+
+static uint32_t ScrambleHash(int a, int b, uint32_t frame) {
+    uint32_t h = 2166136261u;
+    h = (h ^ static_cast<uint32_t>(a)) * 16777619u;
+    h = (h ^ static_cast<uint32_t>(b)) * 16777619u;
+    h = (h ^ frame) * 16777619u;
+    return h;
+}
+
+static void ApplyIdleScrambleGlyph(int documentRow, int col, uint32_t frame, Cell& displayCell) {
+    uint32_t hash = ScrambleHash(documentRow, col, frame);
+
+    if (displayCell.width == 2) {
+        static constexpr uint32_t kHangulStart = 0xAC00;
+        static constexpr uint32_t kHangulCount = 0xD7A3 - 0xAC00 + 1;
+        displayCell.ch = static_cast<wchar_t>(kHangulStart + (hash % kHangulCount));
+    } else {
+        static constexpr wchar_t kScrambleChars[] =
+            L"@#$%&*+=?<>[]{}\\/0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        displayCell.ch = kScrambleChars[hash % (sizeof(kScrambleChars) / sizeof(kScrambleChars[0]) - 1)];
+    }
+
+    displayCell.ch2 = 0;
+    displayCell.flags &= ~CELL_INVERSE;
+}
+
+void App::UpdateScrambledCells() {
+    // Update scrambled cells for each pane
+    m_paneManager.ForEachLeaf([&](SplitNode& node) {
+        auto& buffer = node.pane->GetBuffer();
+        int rows = buffer.GetRows();
+        int cols = buffer.GetCols();
+
+        // Count scramble candidates
+        int scrambleCandidateCount = 0;
+        for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols; c++) {
+                const Cell& cell = buffer.At(r, c);
+                if (IsScrambleCandidate(cell))
+                    scrambleCandidateCount++;
+            }
+        }
+
+        if (scrambleCandidateCount == 0)
+            return;
+
+        // Select one cell to scramble this frame
+        uint32_t hash = ScrambleHash(rows, cols, m_idleScrambleFrame);
+        int scrambleTargetIndex = static_cast<int>(hash % static_cast<uint32_t>(scrambleCandidateCount));
+
+        // Find and scramble the target cell
+        int candidateOrdinal = 0;
+        for (int r = 0; r < rows; r++) {
+            int documentRow = buffer.ViewRowToDocumentRow(r);
+            for (int c = 0; c < cols; c++) {
+                const Cell& cell = buffer.At(r, c);
+                if (!IsScrambleCandidate(cell))
+                    continue;
+
+                if (candidateOrdinal == scrambleTargetIndex) {
+                    // Apply scramble and store
+                    Cell scrambledCell = cell;
+                    ApplyIdleScrambleGlyph(documentRow, c, m_idleScrambleFrame, scrambledCell);
+                    m_scrambledCells[node.pane.get()][{documentRow, c}] = scrambledCell;
+                    return;
+                }
+                candidateOrdinal++;
+            }
+        }
+    });
+}
+
+void App::UpdateSelectionAutoScroll() {
+    if (!m_selecting || !m_selectPane) {
+        KillTimer(m_hwnd, TIMER_SELECTION_AUTOSCROLL);
+        return;
+    }
+
+    float padding = DxRenderer::GetPanePadding();
+    bool outside = (m_lastMouseY < static_cast<int>(m_selectPaneRect.top + padding)) ||
+                   (m_lastMouseY >= static_cast<int>(m_selectPaneRect.bottom - padding));
+    if (outside)
+        SetTimer(m_hwnd, TIMER_SELECTION_AUTOSCROLL, 50, nullptr);
+    else
+        KillTimer(m_hwnd, TIMER_SELECTION_AUTOSCROLL);
+}
+
+void App::ContinueSelectionAutoScroll() {
+    if (!m_selecting || !m_selectPane) {
+        KillTimer(m_hwnd, TIMER_SELECTION_AUTOSCROLL);
+        return;
+    }
+
+    auto& buf = m_selectPane->GetBuffer();
+    float padding = DxRenderer::GetPanePadding();
+    float cellHeight = (std::max)(1.0f, m_renderer.GetCellHeight());
+    bool changed = false;
+
+    if (m_lastMouseY < static_cast<int>(m_selectPaneRect.top + padding)) {
+        int lines = 1 + static_cast<int>((m_selectPaneRect.top + padding - m_lastMouseY) / cellHeight);
+        buf.ScrollBack(lines);
+        changed = true;
+    } else if (m_lastMouseY >= static_cast<int>(m_selectPaneRect.bottom - padding)) {
+        int lines = 1 + static_cast<int>((m_lastMouseY - (m_selectPaneRect.bottom - padding)) / cellHeight);
+        buf.ScrollForward(lines);
+        changed = true;
+    } else {
+        KillTimer(m_hwnd, TIMER_SELECTION_AUTOSCROLL);
+    }
+
+    int viewRow = 0;
+    MouseToCell(m_lastMouseX, m_lastMouseY, m_selectPane, m_selectPaneRect, viewRow, m_selEndCol);
+    m_selEndRow = buf.ViewRowToDocumentRow(viewRow);
+    if (changed)
+        InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
 void App::OnPaint() {
@@ -310,7 +579,16 @@ void App::OnPaint() {
                 sel = {m_selStartRow, m_selStartCol, m_selEndRow, m_selEndCol, true};
                 pSel = &sel;
             }
-            m_renderer.RenderPane(node->pane->GetBuffer(), fullRect, true, true, dragging, pSel, m_settings.dimInactivePanes);
+
+            // Prepare idle effect with scrambled cells for this pane
+            DxRenderer::IdleEffect idleEffect{m_idleScrambleActive, m_idleScrambleFrame, nullptr};
+            auto it = m_scrambledCells.find(node->pane.get());
+            if (it != m_scrambledCells.end())
+                idleEffect.scrambledCells = &it->second;
+            const DxRenderer::IdleEffect* pIdleEffect = (m_idleScrambleActive || idleEffect.scrambledCells) ? &idleEffect : nullptr;
+
+            m_renderer.RenderPane(node->pane->GetBuffer(), fullRect, true, true, dragging, pSel,
+                                  m_settings.dimInactivePanes, pIdleEffect);
         }
     } else {
         SplitNode* activeNode = m_paneManager.GetActiveNode();
@@ -323,7 +601,16 @@ void App::OnPaint() {
                 sel = {m_selStartRow, m_selStartCol, m_selEndRow, m_selEndCol, true};
                 pSel = &sel;
             }
-            m_renderer.RenderPane(node.pane->GetBuffer(), node.rect, isActive, false, dragging, pSel, m_settings.dimInactivePanes);
+
+            // Prepare idle effect with scrambled cells for this pane
+            DxRenderer::IdleEffect idleEffect{m_idleScrambleActive, m_idleScrambleFrame, nullptr};
+            auto it = m_scrambledCells.find(node.pane.get());
+            if (it != m_scrambledCells.end())
+                idleEffect.scrambledCells = &it->second;
+            const DxRenderer::IdleEffect* pIdleEffect = (m_idleScrambleActive || idleEffect.scrambledCells) ? &idleEffect : nullptr;
+
+            m_renderer.RenderPane(node.pane->GetBuffer(), node.rect, isActive, false, dragging, pSel,
+                                  m_settings.dimInactivePanes, pIdleEffect);
         });
 
         std::vector<PaneManager::SeparatorLine> seps;
@@ -333,7 +620,8 @@ void App::OnPaint() {
     }
 
     // Status bar
-    std::wstring statusText;
+    std::wstring statusLeft;
+    std::wstring statusRight;
     int paneCount = 0;
     int currentPaneIndex = 0;
     int index = 0;
@@ -378,25 +666,29 @@ void App::OnPaint() {
         wchar_t timeBuf[16];
         wsprintfW(timeBuf, L"%02d:%02d:%02d", st.wHour, st.wMinute, st.wSecond);
 
-        statusText = L" [" + std::to_wstring(currentPaneIndex) + L"/" + std::to_wstring(paneCount) + L"] " + wtitle;
+        statusLeft = L" [" + std::to_wstring(currentPaneIndex) + L"/" + std::to_wstring(paneCount) + L"] " + wtitle;
         if (!wdir.empty()) {
-            statusText += L" | " + wdir;
+            statusLeft += L" | " + wdir;
         }
-        if (m_paneManager.IsZoomed()) statusText += L" [ZOOM]";
-        if (m_inputMode == InputMode::Prefix) statusText += L" [PREFIX]";
-
-        // Right-align time
-        size_t pad = 0;
-        int totalCols = m_renderer.CalcCols(rc.right);
-        int usedCols = static_cast<int>(statusText.size()) + 10;
-        if (totalCols > usedCols) pad = totalCols - usedCols;
-        statusText += std::wstring(pad, L' ') + timeBuf + L" ";
+        if (m_paneManager.IsZoomed()) statusLeft += L" [ZOOM]";
+        statusRight = timeBuf;
+        if (m_inputMode == InputMode::Prefix)
+            statusRight = L"PREFIX  " + statusRight;
+        if (m_idleScrambleActive)
+            statusRight = L"IDLE  " + statusRight;
     }
 
-    m_renderer.RenderStatusBar(paneAreaH, clientW, statusText);
+    m_renderer.RenderStatusBar(paneAreaH, clientW, statusLeft, statusRight, m_paneManager.IsZoomed());
 
-    if (m_inputMode == InputMode::Prefix)
+    // Draw orange border when in zoom mode
+    if (m_paneManager.IsZoomed()) {
+        m_renderer.RenderZoomBorder(clientW, paneAreaH);
+    }
+
+    if (m_inputMode == InputMode::Prefix && m_settings.showPrefixOverlay) {
         m_renderer.RenderPrefixIndicator();
+        m_renderer.RenderPrefixOverlay(L"V vertical  H horizontal  X close  Z zoom  O settings  Esc cancel");
+    }
 
     m_renderer.EndFrame();
 }
@@ -445,15 +737,20 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
 
     // Ctrl+B: enter prefix mode (check FIRST, before any other logic)
     if (m_inputMode == InputMode::Normal && ctrl && vk == 'B') {
-        m_inputMode = InputMode::Prefix;
-        m_skipNextChar = true;  // Prevent WM_CHAR from sending ^B to terminal
-        UpdateTitleBar();
+        EnterPrefixMode();
+        m_skipNextChar = true;
+        SetTimer(m_hwnd, TIMER_RESET_SKIP_FLAG, 50, nullptr);
         InvalidateRect(m_hwnd, nullptr, FALSE);
         return true;
     }
 
     // Prefix mode: handle all commands here (bypasses IME for Korean input)
     if (m_inputMode == InputMode::Prefix) {
+        if (vk == VK_ESCAPE) {
+            ExitPrefixMode();
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+            return true;
+        }
         // If VK_PROCESSKEY, IME is active - defer to OnChar for Korean compatibility
         if (vk == VK_PROCESSKEY) {
             return true;
@@ -496,17 +793,18 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
             OpenSettings();
         }
         else if (vk == 'B' && ctrl) {  // Ctrl+B: send literal 0x02
-            if (auto* p = m_paneManager.GetActivePane())
+            if (auto* p = m_paneManager.GetActivePane()) {
                 p->SendInput("\x02", 1);
+            }
         }
         else {
             handled = false;
         }
 
         if (handled) {
-            m_inputMode = InputMode::Normal;
-            m_skipNextChar = true;  // Skip WM_CHAR in English mode
-            UpdateTitleBar();
+            ExitPrefixMode();
+            m_skipNextChar = true;
+            SetTimer(m_hwnd, TIMER_RESET_SKIP_FLAG, 50, nullptr);
             InvalidateRect(m_hwnd, nullptr, FALSE);
         }
         return true;
@@ -516,25 +814,18 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
     Pane* active = m_paneManager.GetActivePane();
     if (!active) return false;
 
+    // Input will be buffered if pane is not ready
+
     // Ctrl+C: copy if selection exists, otherwise send SIGINT (0x03) via WM_CHAR
     if (ctrl && vk == 'C' && m_hasSelection) {
         CopySelection();
+        m_skipNextChar = true;
+        SetTimer(m_hwnd, TIMER_RESET_SKIP_FLAG, 50, nullptr);
         return true;
     }
     // Ctrl+A: select all visible content in active pane
     if (ctrl && vk == 'A') {
-        auto& buf = active->GetBuffer();
-        m_selectPane = active;
-        m_paneManager.ForEachLeaf([&](SplitNode& node) {
-            if (node.pane.get() == active)
-                m_selectPaneRect = node.rect;
-        });
-        m_selStartRow = 0;
-        m_selStartCol = 0;
-        m_selEndRow = buf.GetRows() - 1;
-        m_selEndCol = buf.GetCols() - 1;
-        m_hasSelection = true;
-        m_selecting = false;
+        SelectAllVisible(active);
         InvalidateRect(m_hwnd, nullptr, FALSE);
         return true;
     }
@@ -573,15 +864,16 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
             handled = true;
         }
         if (handled) {
-            m_skipNextChar = true;  // Prevent WM_CHAR from sending control character
+            m_skipNextChar = true;
+            SetTimer(m_hwnd, TIMER_RESET_SKIP_FLAG, 50, nullptr);
             InvalidateRect(m_hwnd, nullptr, FALSE);
             return true;
         }
     }
 
     // Shift+Arrow: keyboard text selection (Home/End pass through to shell)
-    if (shift && !ctrl && (vk == VK_LEFT || vk == VK_RIGHT ||
-                           vk == VK_UP || vk == VK_DOWN)) {
+    if (shift && (vk == VK_LEFT || vk == VK_RIGHT || vk == VK_UP || vk == VK_DOWN ||
+                  vk == VK_HOME || vk == VK_END)) {
         auto& buf = active->GetBuffer();
         Pane* pane = active;
         D2D1_RECT_F paneRect = {};
@@ -595,7 +887,7 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
             // Start selection at cursor position
             m_selectPane = pane;
             m_selectPaneRect = paneRect;
-            m_selStartRow = buf.GetCursorRow();
+            m_selStartRow = buf.GetScrollbackSize() + buf.GetCursorRow();
             m_selStartCol = buf.GetCursorCol();
             m_selEndRow = m_selStartRow;
             m_selEndCol = m_selStartCol;
@@ -603,20 +895,49 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
         }
 
         // Extend selection end
+        int maxDocumentRow = buf.GetDocumentRowCount() - 1;
         switch (vk) {
         case VK_LEFT:
-            if (m_selEndCol > 0) m_selEndCol--;
-            else if (m_selEndRow > 0) { m_selEndRow--; m_selEndCol = buf.GetCols() - 1; }
+            if (ctrl) {
+                while (m_selEndCol > 0) {
+                    const Cell& c = buf.CellAtDocumentRow(m_selEndRow, m_selEndCol - 1);
+                    if (!IsWordChar(c.ch)) break;
+                    m_selEndCol--;
+                }
+                if (m_selEndCol > 0) m_selEndCol--;
+            } else {
+                if (m_selEndCol > 0) m_selEndCol--;
+                else if (m_selEndRow > 0) { m_selEndRow--; m_selEndCol = buf.GetCols() - 1; }
+            }
             break;
         case VK_RIGHT:
-            if (m_selEndCol < buf.GetCols() - 1) m_selEndCol++;
-            else if (m_selEndRow < buf.GetRows() - 1) { m_selEndRow++; m_selEndCol = 0; }
+            if (ctrl) {
+                while (m_selEndCol < buf.GetCols() - 1) {
+                    const Cell& c = buf.CellAtDocumentRow(m_selEndRow, m_selEndCol + 1);
+                    if (!IsWordChar(c.ch)) break;
+                    m_selEndCol++;
+                }
+                if (m_selEndCol < buf.GetCols() - 1) m_selEndCol++;
+            } else {
+                if (m_selEndCol < buf.GetCols() - 1) m_selEndCol++;
+                else if (m_selEndRow < maxDocumentRow) { m_selEndRow++; m_selEndCol = 0; }
+            }
             break;
         case VK_UP:
-            if (m_selEndRow > 0) m_selEndRow--;
+            if (ctrl) m_selEndRow = 0;
+            else if (m_selEndRow > 0) m_selEndRow--;
             break;
         case VK_DOWN:
-            if (m_selEndRow < buf.GetRows() - 1) m_selEndRow++;
+            if (ctrl) m_selEndRow = maxDocumentRow;
+            else if (m_selEndRow < maxDocumentRow) m_selEndRow++;
+            break;
+        case VK_HOME:
+            m_selEndCol = 0;
+            if (ctrl) m_selEndRow = 0;
+            break;
+        case VK_END:
+            m_selEndCol = buf.GetCols() - 1;
+            if (ctrl) m_selEndRow = maxDocumentRow;
             break;
         }
         InvalidateRect(m_hwnd, nullptr, FALSE);
@@ -683,6 +1004,7 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
     default: return false;
     }
 
+    // SendInput will buffer if not ready
     active->SendInput(seq);
     return true;
 }
@@ -691,6 +1013,7 @@ void App::OnChar(wchar_t ch) {
     // Skip character if already handled in OnKeyDown
     if (m_skipNextChar) {
         m_skipNextChar = false;
+        KillTimer(m_hwnd, TIMER_RESET_SKIP_FLAG);
         return;
     }
 
@@ -704,8 +1027,7 @@ void App::OnChar(wchar_t ch) {
     // Prefix key detection (fallback if OnKeyDown missed it)
     if (m_inputMode == InputMode::Normal) {
         if (ch == 0x02) { // Ctrl+B: enter prefix mode
-            m_inputMode = InputMode::Prefix;
-            UpdateTitleBar();
+            EnterPrefixMode();
             InvalidateRect(m_hwnd, nullptr, FALSE);
             return;
         }
@@ -738,6 +1060,8 @@ void App::OnChar(wchar_t ch) {
         Pane* active = m_paneManager.GetActivePane();
         if (!active) return;
 
+        // Input will be buffered if pane is not ready
+
         // Auto-scroll to bottom on typing (but not for control characters)
         active->GetBuffer().ScrollToBottom();
 
@@ -750,8 +1074,7 @@ void App::OnChar(wchar_t ch) {
     }
 
     // Prefix mode commands
-    m_inputMode = InputMode::Normal;
-    UpdateTitleBar();
+    ExitPrefixMode();
 
     // Map Korean Hangul characters to English commands (for IME compatibility)
     wchar_t cmd = ch;
@@ -776,8 +1099,9 @@ void App::OnChar(wchar_t ch) {
 
     switch (cmd) {
     case 0x02: // Double Ctrl+B: send literal to pane
-        if (auto* p = m_paneManager.GetActivePane())
+        if (auto* p = m_paneManager.GetActivePane()) {
             p->SendInput("\x02", 1);
+        }
         break;
     case '%': case 'v':
         SplitActivePane(SplitDirection::Vertical);
@@ -832,6 +1156,10 @@ void App::OnPtyOutput(WPARAM wParam, LPARAM lParam) {
     }
 
     pane->ProcessOutput();
+
+    // Clear scrambled cells for this pane when new output arrives
+    m_scrambledCells.erase(pane);
+
     InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
@@ -850,8 +1178,28 @@ void App::OnMouseWheel(WPARAM wParam, LPARAM lParam) {
         pane = m_paneManager.GetActivePane();
     if (!pane) return;
 
-    int lines = 3;
-    if (delta > 0)
+    UINT linesPerNotch = 3;
+    if (m_settings.scrollLines > 0) {
+        linesPerNotch = static_cast<UINT>(m_settings.scrollLines);
+    } else {
+        SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &linesPerNotch, 0);
+    }
+
+    int totalDelta = m_wheelDeltaRemainder + delta;
+    int steps = totalDelta / WHEEL_DELTA;
+    m_wheelDeltaRemainder = totalDelta - steps * WHEEL_DELTA;
+
+    if (steps == 0 || linesPerNotch == 0)
+        return;
+
+    int lines = 0;
+    if (linesPerNotch == WHEEL_PAGESCROLL) {
+        lines = (std::max)(1, pane->GetBuffer().GetRows() - 1);
+    } else {
+        lines = static_cast<int>(linesPerNotch) * (steps > 0 ? steps : -steps);
+    }
+
+    if (steps > 0)
         pane->GetBuffer().ScrollBack(lines);
     else
         pane->GetBuffer().ScrollForward(lines);
@@ -866,8 +1214,12 @@ void App::SplitActivePane(SplitDirection dir) {
 }
 
 void App::CloseActivePane() {
+    // Don't close if only one pane remains
+    if (m_paneManager.HasSinglePane())
+        return;
+
     if (!m_paneManager.CloseActive()) {
-        // Last pane closed
+        // Last pane closed (should not happen due to HasSinglePane check)
         DestroyWindow(m_hwnd);
         return;
     }
@@ -934,13 +1286,31 @@ void App::ApplyScrollbarDrag(int mouseY) {
     buf.ScrollBack(offset);
 }
 
-void App::MouseToCell(int mx, int my, D2D1_RECT_F rect, int& row, int& col) {
+void App::MouseToCell(int mx, int my, Pane* pane, D2D1_RECT_F rect, int& row, int& col) {
     float cw = m_renderer.GetCellWidth();
     float ch = m_renderer.GetCellHeight();
-    col = static_cast<int>((mx - rect.left) / cw);
-    row = static_cast<int>((my - rect.top) / ch);
+    float padding = DxRenderer::GetPanePadding();
+    float contentLeft = rect.left + padding;
+    float contentTop = rect.top + padding;
+    float contentRight = rect.right - padding;
+    float contentBottom = rect.bottom - padding;
+
+    float clampedX = static_cast<float>(mx);
+    float clampedY = static_cast<float>(my);
+    if (clampedX < contentLeft) clampedX = contentLeft;
+    if (clampedY < contentTop) clampedY = contentTop;
+    if (clampedX >= contentRight) clampedX = contentRight - 1.0f;
+    if (clampedY >= contentBottom) clampedY = contentBottom - 1.0f;
+
+    col = static_cast<int>((clampedX - contentLeft) / cw);
+    row = static_cast<int>((clampedY - contentTop) / ch);
     if (col < 0) col = 0;
     if (row < 0) row = 0;
+    if (pane) {
+        auto& buf = pane->GetBuffer();
+        if (col >= buf.GetCols()) col = buf.GetCols() - 1;
+        if (row >= buf.GetRows()) row = buf.GetRows() - 1;
+    }
 }
 
 static bool IsWordChar(wchar_t ch) {
@@ -961,7 +1331,22 @@ void App::OnLButtonDblClk(int x, int y) {
         return;
 
     int row, col;
-    MouseToCell(x, y, rect, row, col);
+    MouseToCell(x, y, pane, rect, row, col);
+
+    DWORD now = GetTickCount();
+    if (pane == m_lastDblClickPane &&
+        row == m_lastDblClickRow &&
+        now - m_lastDblClickTick <= GetDoubleClickTime()) {
+        SelectLineAt(pane, row);
+        m_lastDblClickTick = 0;
+        m_lastDblClickRow = -1;
+        m_lastDblClickPane = nullptr;
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+        return;
+    }
+    m_lastDblClickTick = now;
+    m_lastDblClickRow = row;
+    m_lastDblClickPane = pane;
 
     auto& buf = pane->GetBuffer();
     int cols = buf.GetCols();
@@ -990,9 +1375,10 @@ void App::OnLButtonDblClk(int x, int y) {
 
     m_selectPane = pane;
     m_selectPaneRect = rect;
-    m_selStartRow = row;
+    int documentRow = buf.ViewRowToDocumentRow(row);
+    m_selStartRow = documentRow;
     m_selStartCol = left;
-    m_selEndRow = row;
+    m_selEndRow = documentRow;
     m_selEndCol = right;
     m_hasSelection = true;
     m_selecting = false;
@@ -1000,6 +1386,8 @@ void App::OnLButtonDblClk(int x, int y) {
 }
 
 void App::OnLButtonDown(int x, int y) {
+    m_lastMouseX = x;
+    m_lastMouseY = y;
     // Separator drag (highest priority)
     SplitNode* splitNode = nullptr;
     if (HitTestSeparator(static_cast<float>(x), static_cast<float>(y), splitNode)) {
@@ -1040,7 +1428,9 @@ void App::OnLButtonDown(int x, int y) {
         m_selecting = true;
         m_selectPane = pane;
         m_selectPaneRect = rect;
-        MouseToCell(x, y, rect, m_selStartRow, m_selStartCol);
+        int viewRow = 0;
+        MouseToCell(x, y, pane, rect, viewRow, m_selStartCol);
+        m_selStartRow = pane->GetBuffer().ViewRowToDocumentRow(viewRow);
         m_selEndRow = m_selStartRow;
         m_selEndCol = m_selStartCol;
         SetCapture(m_hwnd);
@@ -1049,6 +1439,8 @@ void App::OnLButtonDown(int x, int y) {
 }
 
 void App::OnMouseMove(int x, int y) {
+    m_lastMouseX = x;
+    m_lastMouseY = y;
     if (m_draggingSeparator) {
         ApplySeparatorDrag(x, y);
         InvalidateRect(m_hwnd, nullptr, FALSE);
@@ -1056,7 +1448,10 @@ void App::OnMouseMove(int x, int y) {
         ApplyScrollbarDrag(y);
         InvalidateRect(m_hwnd, nullptr, FALSE);
     } else if (m_selecting) {
-        MouseToCell(x, y, m_selectPaneRect, m_selEndRow, m_selEndCol);
+        int viewRow = 0;
+        MouseToCell(x, y, m_selectPane, m_selectPaneRect, viewRow, m_selEndCol);
+        m_selEndRow = m_selectPane->GetBuffer().ViewRowToDocumentRow(viewRow);
+        UpdateSelectionAutoScroll();
         InvalidateRect(m_hwnd, nullptr, FALSE);
     }
 }
@@ -1074,22 +1469,48 @@ void App::OnLButtonUp() {
     } else if (m_selecting) {
         m_selecting = false;
         m_hasSelection = (m_selStartRow != m_selEndRow || m_selStartCol != m_selEndCol);
+        KillTimer(m_hwnd, TIMER_SELECTION_AUTOSCROLL);
         ReleaseCapture();
     }
     InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
 void App::OnRButtonUp(int x, int y) {
-    (void)x; (void)y;
-    if (m_hasSelection) {
+    Pane* pane = nullptr;
+    D2D1_RECT_F rect = {};
+    if (m_paneManager.FindPaneAndRectAtPoint(static_cast<float>(x), static_cast<float>(y), pane, rect)) {
+        m_paneManager.SetActivePane(pane);
+        m_selectPaneRect = rect;
+    }
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+
+    AppendMenuW(menu, MF_STRING | (m_hasSelection ? MF_ENABLED : MF_GRAYED), 1, L"Copy");
+    AppendMenuW(menu, MF_STRING, 2, L"Paste");
+    AppendMenuW(menu, MF_STRING | (pane ? MF_ENABLED : MF_GRAYED), 3, L"Select All");
+
+    POINT pt = {x, y};
+    ClientToScreen(m_hwnd, &pt);
+    int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, m_hwnd, nullptr);
+    DestroyMenu(menu);
+
+    switch (cmd) {
+    case 1:
         CopySelection();
-        ClearSelection();
-    } else {
+        break;
+    case 2:
         PasteClipboard();
+        break;
+    case 3:
+        SelectAllVisible(pane ? pane : m_paneManager.GetActivePane());
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+        break;
     }
 }
 
 void App::ClearSelection() {
+    KillTimer(m_hwnd, TIMER_SELECTION_AUTOSCROLL);
     m_hasSelection = false;
     m_selecting = false;
     m_selectPane = nullptr;
@@ -1113,8 +1534,7 @@ void App::CopySelection() {
         int cStart = (r == sr) ? sc : 0;
         int cEnd = (r == er) ? ec : cols - 1;
         for (int c = cStart; c <= cEnd && c < cols; c++) {
-            const Cell& cell = buf.GetScrollOffset() > 0
-                ? buf.ViewAt(r, c) : buf.At(r, c);
+            const Cell& cell = buf.CellAtDocumentRow(r, c);
             if (cell.width == 0) continue;
             if (cell.ch != 0)
                 text += cell.ch;
@@ -1173,18 +1593,14 @@ void App::PasteClipboard() {
 }
 
 void App::OpenSettings() {
-    if (ShowSettingsDialog(m_hwnd, m_settings)) {
-        m_renderer.UpdateFont(m_settings.fontName, m_settings.fontSize);
-        m_renderer.SetBackgroundColor(m_settings.backgroundColor);
-
-        RECT rc;
-        GetClientRect(m_hwnd, &rc);
-        float statusH = m_renderer.GetStatusBarHeight();
-        D2D1_RECT_F paneRect = {0, 0, static_cast<float>(rc.right),
-                                 static_cast<float>(rc.bottom) - statusH};
-        m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(),
-                               m_renderer.GetCellHeight());
-        InvalidateRect(m_hwnd, nullptr, FALSE);
+    Settings original = m_settings;
+    if (ShowSettingsDialog(m_hwnd, m_settings, [this](const Settings& preview) {
+            ApplyVisualSettings(preview);
+        })) {
+        ApplyVisualSettings(m_settings);
+    } else {
+        m_settings = original;
+        ApplyVisualSettings(m_settings);
     }
 }
 

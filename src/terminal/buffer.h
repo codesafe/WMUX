@@ -88,11 +88,15 @@ public:
 
     // Scrollback
     const Cell& ViewAt(int viewRow, int col) const;
+    const Cell& CellAtDocumentRow(int documentRow, int col) const;
+    int ViewRowToDocumentRow(int viewRow) const;
+    int DocumentRowToViewRow(int documentRow) const;
     void ScrollBack(int lines);
     void ScrollForward(int lines);
     void ScrollToBottom();
     int GetScrollOffset() const { return m_scrollOffset; }
     int GetScrollbackSize() const { return static_cast<int>(m_scrollback.size()); }
+    int GetDocumentRowCount() const { return static_cast<int>(m_scrollback.size()) + m_rows; }
 
     // Attributes
     void ResetAttributes();

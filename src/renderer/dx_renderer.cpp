@@ -84,6 +84,24 @@ bool DxRenderer::MeasureCellSize() {
     return true;
 }
 
+float DxRenderer::MeasureTextWidth(const std::wstring& text) const {
+    if (!m_pDWriteFactory || !m_pTextFormat || text.empty())
+        return 0.0f;
+
+    ComPtr<IDWriteTextLayout> layout;
+    HRESULT hr = m_pDWriteFactory->CreateTextLayout(
+        text.c_str(), static_cast<UINT32>(text.size()), m_pTextFormat.Get(),
+        4096.0f, m_cellHeight + 8.0f, layout.GetAddressOf());
+    if (FAILED(hr))
+        return 0.0f;
+
+    DWRITE_TEXT_METRICS metrics = {};
+    hr = layout->GetMetrics(&metrics);
+    if (FAILED(hr))
+        return 0.0f;
+    return metrics.widthIncludingTrailingWhitespace;
+}
+
 bool DxRenderer::CreateDeviceResources() {
     if (m_pRenderTarget) return true;
 
@@ -252,23 +270,54 @@ void DxRenderer::EndFrame() {
         DiscardDeviceResources();
 }
 
-static bool CellInSelection(int r, int c, const DxRenderer::Selection* sel) {
+static bool CellInSelection(int documentRow, int c, const DxRenderer::Selection* sel) {
     if (!sel || !sel->active) return false;
-    int sr = sel->startRow, sc = sel->startCol;
-    int er = sel->endRow, ec = sel->endCol;
+    int sr = sel->startDocumentRow, sc = sel->startCol;
+    int er = sel->endDocumentRow, ec = sel->endCol;
     if (sr > er || (sr == er && sc > ec)) {
         std::swap(sr, er); std::swap(sc, ec);
     }
-    if (r < sr || r > er) return false;
-    if (r == sr && r == er) return c >= sc && c <= ec;
-    if (r == sr) return c >= sc;
-    if (r == er) return c <= ec;
+    if (documentRow < sr || documentRow > er) return false;
+    if (documentRow == sr && documentRow == er) return c >= sc && c <= ec;
+    if (documentRow == sr) return c >= sc;
+    if (documentRow == er) return c <= ec;
     return true;
+}
+
+static uint32_t ScrambleHash(int documentRow, int col, uint32_t frame) {
+    uint32_t value = static_cast<uint32_t>(documentRow) * 73856093u;
+    value ^= static_cast<uint32_t>(col) * 19349663u;
+    value ^= frame * 83492791u;
+    value ^= (value >> 13);
+    value *= 1274126177u;
+    return value ^ (value >> 16);
+}
+
+static bool IsScrambleCandidate(const Cell& cell) {
+    return cell.width > 0 && cell.ch != 0 && cell.ch != L' ';
+}
+
+static void ApplyIdleScrambleGlyph(int documentRow, int col, uint32_t frame, Cell& displayCell) {
+    uint32_t hash = ScrambleHash(documentRow, col, frame);
+
+    if (displayCell.width == 2) {
+        static constexpr uint32_t kHangulStart = 0xAC00;
+        static constexpr uint32_t kHangulCount = 0xD7A3 - 0xAC00 + 1;
+        displayCell.ch = static_cast<wchar_t>(kHangulStart + (hash % kHangulCount));
+    } else {
+        static constexpr wchar_t kScrambleChars[] =
+            L"@#$%&*+=?<>[]{}\\/0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        displayCell.ch = kScrambleChars[hash % (sizeof(kScrambleChars) / sizeof(kScrambleChars[0]) - 1)];
+    }
+
+    displayCell.ch2 = 0;
+    displayCell.flags &= ~CELL_INVERSE;
 }
 
 void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
                              bool isActive, bool isZoomed, bool scrollbarDragging,
-                             const Selection* sel, bool dimInactive) {
+                             const Selection* sel, bool dimInactive,
+                             const IdleEffect* idleEffect) {
     m_pRenderTarget->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
 
     // Fill pane background
@@ -291,18 +340,37 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
     bool cursorVisible = buffer.IsCursorVisible();
     int scrollOffset = buffer.GetScrollOffset();
     bool useViewAt = (scrollOffset > 0);
+    int scrambleCandidateCount = 0;
+    int scrambleTargetIndex = -1;
+
+    if (idleEffect && idleEffect->active) {
+        for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols; c++) {
+                const Cell& cell = useViewAt ? buffer.ViewAt(r, c) : buffer.At(r, c);
+                if (IsScrambleCandidate(cell))
+                    scrambleCandidateCount++;
+            }
+        }
+        if (scrambleCandidateCount > 0) {
+            uint32_t hash = ScrambleHash(rows, cols, idleEffect->frame);
+            scrambleTargetIndex = static_cast<int>(hash % static_cast<uint32_t>(scrambleCandidateCount));
+        }
+    }
 
     // Pre-draw selection background as continuous row spans (no sub-pixel gaps)
     if (sel && sel->active) {
         m_pBrush->SetColor(D2D1::ColorF(0.2f, 0.4f, 0.8f, 1.0f));
-        int sr = sel->startRow, sc = sel->startCol;
-        int er = sel->endRow, ec = sel->endCol;
+        int sr = sel->startDocumentRow, sc = sel->startCol;
+        int er = sel->endDocumentRow, ec = sel->endCol;
         if (sr > er || (sr == er && sc > ec)) { std::swap(sr, er); std::swap(sc, ec); }
-        for (int r = sr; r <= er && r < rows; r++) {
+        for (int r = 0; r < rows; r++) {
+            int documentRow = buffer.ViewRowToDocumentRow(r);
+            if (documentRow < sr || documentRow > er)
+                continue;
             float ry = contentRect.top + r * m_cellHeight;
             if (ry >= contentRect.bottom) break;
-            int cS = (r == sr) ? sc : 0;
-            int cE = (r == er) ? ec : cols - 1;
+            int cS = (documentRow == sr) ? sc : 0;
+            int cE = (documentRow == er) ? ec : cols - 1;
             if (cE >= cols) cE = cols - 1;
             float x1 = contentRect.left + cS * m_cellWidth;
             float x2 = contentRect.left + (cE + 1) * m_cellWidth;
@@ -313,15 +381,37 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
     // Use aliased mode for crisp cell boundaries
     m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
 
+    int candidateOrdinal = 0;
     for (int r = 0; r < rows; r++) {
         // Pixel-snap: integer boundaries eliminate sub-pixel gaps
         float y  = floorf(contentRect.top + r * m_cellHeight);
         float y2 = floorf(contentRect.top + (r + 1) * m_cellHeight);
         if (y >= contentRect.bottom) break;
-
+        int documentRow = buffer.ViewRowToDocumentRow(r);
         for (int c = 0; c < cols; c++) {
-            const Cell& cell = useViewAt ? buffer.ViewAt(r, c) : buffer.At(r, c);
-            if (cell.width == 0) continue;
+            const Cell& sourceCell = useViewAt ? buffer.ViewAt(r, c) : buffer.At(r, c);
+            if (sourceCell.width == 0) continue;
+
+            Cell cell = sourceCell;
+            bool scrambled = false;
+
+            // Check if this cell has a stored scrambled version
+            if (idleEffect && idleEffect->scrambledCells) {
+                auto it = idleEffect->scrambledCells->find({documentRow, c});
+                if (it != idleEffect->scrambledCells->end()) {
+                    cell = it->second;
+                    scrambled = true;
+                }
+            }
+
+            // If actively scrambling, apply new scramble to one cell per frame
+            if (!scrambled && scrambleTargetIndex >= 0 && IsScrambleCandidate(sourceCell)) {
+                if (candidateOrdinal == scrambleTargetIndex) {
+                    ApplyIdleScrambleGlyph(documentRow, c, idleEffect->frame, cell);
+                    scrambled = true;
+                }
+                candidateOrdinal++;
+            }
 
             int span = (cell.width == 2) ? 2 : 1;
             float x  = floorf(contentRect.left + c * m_cellWidth);
@@ -334,12 +424,18 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
             D2D1_COLOR_F fg = GetCellFgColor(cell);
             D2D1_COLOR_F bg = GetCellBgColor(cell);
 
-            bool isSelected = CellInSelection(r, c, sel);
+            bool isSelected = CellInSelection(documentRow, c, sel);
 
             if (cell.flags & CELL_INVERSE) std::swap(fg, bg);
             if (isCursor) std::swap(fg, bg);
             if (isSelected) {
                 fg = D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
+            } else if (scrambled) {
+                fg = D2D1::ColorF(
+                    0.55f + ((documentRow + c + idleEffect->frame) % 20) / 50.0f,
+                    0.78f,
+                    0.40f + ((documentRow + idleEffect->frame) % 10) / 40.0f,
+                    1.0f);
             }
 
             D2D1_RECT_F cellRect = {x, y, x2, y2};
@@ -421,17 +517,15 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
                 // Pixel-snap center and thickness for crisp lines
                 float mx = floorf(x + cw / 2);
                 float my = floorf(y + ch2f / 2);
-                float t = (std::max)(1.0f, floorf(ch2f / 10)); // line thickness
-                float ht = floorf(t / 2);
-                if (ht < 1.0f) ht = 1.0f; // minimum half-thickness
+                float ht = 0.5f; // half-thickness for 1-pixel lines
                 switch (ch) {
                 case 0x2500: case 0x2501: // ─ ━
-                    if (ch == 0x2501) ht = t;
+                    if (ch == 0x2501) ht = 1.0f; // thick horizontal: 2px total
                     // Extend slightly to connect with adjacent cells
                     m_pRenderTarget->FillRectangle({x - 0.5f, my - ht, x2 + 0.5f, my + ht}, m_pBrush.Get());
                     break;
                 case 0x2502: case 0x2503: // │ ┃
-                    if (ch == 0x2503) ht = t;
+                    if (ch == 0x2503) ht = 1.0f; // thick vertical: 2px total
                     // Extend slightly to connect with adjacent cells
                     m_pRenderTarget->FillRectangle({mx - ht, y - 0.5f, mx + ht, y2 + 0.5f}, m_pBrush.Get());
                     break;
@@ -472,12 +566,12 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
                     m_pRenderTarget->FillRectangle({mx - ht, y - 0.5f, mx + ht, y2 + 0.5f}, m_pBrush.Get());
                     break;
                 case 0x2550: // ═ double horizontal
-                    m_pRenderTarget->FillRectangle({x - 0.5f, my - t, x2 + 0.5f, my - ht + 1}, m_pBrush.Get());
-                    m_pRenderTarget->FillRectangle({x - 0.5f, my + ht - 1, x2 + 0.5f, my + t}, m_pBrush.Get());
+                    m_pRenderTarget->FillRectangle({x - 0.5f, my - 1.5f, x2 + 0.5f, my - 0.5f}, m_pBrush.Get());
+                    m_pRenderTarget->FillRectangle({x - 0.5f, my + 0.5f, x2 + 0.5f, my + 1.5f}, m_pBrush.Get());
                     break;
                 case 0x2551: // ║ double vertical
-                    m_pRenderTarget->FillRectangle({mx - t, y - 0.5f, mx - ht + 1, y2 + 0.5f}, m_pBrush.Get());
-                    m_pRenderTarget->FillRectangle({mx + ht - 1, y - 0.5f, mx + t, y2 + 0.5f}, m_pBrush.Get());
+                    m_pRenderTarget->FillRectangle({mx - 1.5f, y - 0.5f, mx - 0.5f, y2 + 0.5f}, m_pBrush.Get());
+                    m_pRenderTarget->FillRectangle({mx + 0.5f, y - 0.5f, mx + 1.5f, y2 + 0.5f}, m_pBrush.Get());
                     break;
                 default: // Fallback: draw with font for unhandled box-drawing
                     m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -590,23 +684,47 @@ void DxRenderer::RenderSeparator(float x1, float y1, float x2, float y2) {
     m_pRenderTarget->FillRectangle({x1, y1, x2, y2}, m_pBrush.Get());
 }
 
-void DxRenderer::RenderStatusBar(float y, float width, const std::wstring& text) {
+void DxRenderer::RenderStatusBar(float y, float width, const std::wstring& leftText,
+                                 const std::wstring& rightText, bool isZoomed) {
     float barH = m_cellHeight + 4.0f;
     D2D1_RECT_F barRect = {0, y, width, y + barH};
 
-    // Background
-    m_pBrush->SetColor(D2D1::ColorF(0x1A1A2E));
+    // Background (orange when zoomed, dark blue otherwise)
+    if (isZoomed) {
+        m_pBrush->SetColor(D2D1::ColorF(0xFF8C00, 0.7f)); // Dark orange with alpha
+    } else {
+        m_pBrush->SetColor(D2D1::ColorF(0x1A1A2E));
+    }
     m_pRenderTarget->FillRectangle(barRect, m_pBrush.Get());
 
-    // Top border line
-    m_pBrush->SetColor(D2D1::ColorF(0x404060));
+    // Top border line (brighter orange when zoomed)
+    if (isZoomed) {
+        m_pBrush->SetColor(D2D1::ColorF(0xFFA500)); // Bright orange
+    } else {
+        m_pBrush->SetColor(D2D1::ColorF(0x404060));
+    }
     m_pRenderTarget->FillRectangle({0, y, width, y + 1.0f}, m_pBrush.Get());
 
-    // Text
-    if (!text.empty()) {
+    const float padding = 6.0f;
+    const float gap = 12.0f;
+    float rightWidth = MeasureTextWidth(rightText);
+    float rightStart = width - padding - rightWidth;
+    if (rightStart < width * 0.55f)
+        rightStart = width * 0.55f;
+
+    if (!leftText.empty()) {
         m_pBrush->SetColor(D2D1::ColorF(0xCCCCCC));
-        D2D1_RECT_F textRect = {6.0f, y + 2.0f, width - 6.0f, y + barH};
-        m_pRenderTarget->DrawText(text.c_str(), static_cast<UINT32>(text.size()),
+        float leftRight = rightText.empty() ? (width - padding) : (rightStart - gap);
+        D2D1_RECT_F textRect = {padding, y + 2.0f, leftRight, y + barH};
+        m_pRenderTarget->DrawText(leftText.c_str(), static_cast<UINT32>(leftText.size()),
+                                  m_pTextFormat.Get(), textRect, m_pBrush.Get(),
+                                  D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+    }
+
+    if (!rightText.empty()) {
+        m_pBrush->SetColor(D2D1::ColorF(0xF9F1A5));
+        D2D1_RECT_F textRect = {rightStart, y + 2.0f, width - padding, y + barH};
+        m_pRenderTarget->DrawText(rightText.c_str(), static_cast<UINT32>(rightText.size()),
                                   m_pTextFormat.Get(), textRect, m_pBrush.Get(),
                                   D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
     }
@@ -619,6 +737,46 @@ void DxRenderer::RenderPrefixIndicator() {
         static_cast<float>(m_width) - 4.0f, 14.0f
     };
     m_pRenderTarget->FillRectangle(indicator, m_pBrush.Get());
+}
+
+void DxRenderer::RenderPrefixOverlay(const std::wstring& text) {
+    if (text.empty())
+        return;
+
+    float overlayW = MeasureTextWidth(text) + 20.0f;
+    float overlayH = m_cellHeight + 12.0f;
+    if (overlayW < 240.0f) overlayW = 240.0f;
+    if (overlayW > static_cast<float>(m_width) - 20.0f)
+        overlayW = static_cast<float>(m_width) - 20.0f;
+
+    float left = (static_cast<float>(m_width) - overlayW) * 0.5f;
+    float top = 8.0f;
+    D2D1_RECT_F rect = {left, top, left + overlayW, top + overlayH};
+
+    m_pBrush->SetColor(D2D1::ColorF(0.06f, 0.08f, 0.14f, 0.92f));
+    m_pRenderTarget->FillRectangle(rect, m_pBrush.Get());
+    m_pBrush->SetColor(D2D1::ColorF(0xF9F1A5));
+    m_pRenderTarget->FillRectangle({rect.left, rect.bottom - 2.0f, rect.right, rect.bottom}, m_pBrush.Get());
+    m_pBrush->SetColor(D2D1::ColorF(0xE8E8E8));
+    D2D1_RECT_F textRect = {rect.left + 10.0f, rect.top + 4.0f, rect.right - 10.0f, rect.bottom};
+    m_pRenderTarget->DrawText(text.c_str(), static_cast<UINT32>(text.size()),
+                              m_pTextFormat.Get(), textRect, m_pBrush.Get(),
+                              D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+}
+
+void DxRenderer::RenderZoomBorder(float width, float height) {
+    // Draw thick orange border around entire pane area
+    const float borderWidth = 3.0f;
+    m_pBrush->SetColor(D2D1::ColorF(0xFFA500)); // Bright orange
+
+    // Top
+    m_pRenderTarget->FillRectangle({0, 0, width, borderWidth}, m_pBrush.Get());
+    // Bottom
+    m_pRenderTarget->FillRectangle({0, height - borderWidth, width, height}, m_pBrush.Get());
+    // Left
+    m_pRenderTarget->FillRectangle({0, 0, borderWidth, height}, m_pBrush.Get());
+    // Right
+    m_pRenderTarget->FillRectangle({width - borderWidth, 0, width, height}, m_pBrush.Get());
 }
 
 void DxRenderer::InitPalette() {

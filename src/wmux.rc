@@ -1,5 +1,9 @@
 #include <winver.h>
 
+#define IDI_WMUX 101
+
+IDI_WMUX ICON "../icon.ico"
+
 1 RT_MANIFEST "wmux.manifest"
 
 VS_VERSION_INFO VERSIONINFO

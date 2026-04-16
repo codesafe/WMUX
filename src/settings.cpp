@@ -47,12 +47,25 @@ void Settings::Load() {
     if (windowHeight < 150) windowHeight = 150;
 
     dimInactivePanes = GetPrivateProfileIntW(L"appearance", L"dim_inactive_panes", 1, path.c_str()) != 0;
+    showPrefixOverlay = GetPrivateProfileIntW(L"appearance", L"show_prefix_overlay", 1, path.c_str()) != 0;
 
     // Background color as hex (e.g., "1E1E1E")
     wchar_t colorBuf[16] = {};
     GetPrivateProfileStringW(L"appearance", L"background_color", L"1E1E1E",
                              colorBuf, 16, path.c_str());
     backgroundColor = static_cast<uint32_t>(wcstoul(colorBuf, nullptr, 16));
+
+    prefixTimeoutMs = GetPrivateProfileIntW(L"input", L"prefix_timeout_ms", 1500, path.c_str());
+    if (prefixTimeoutMs < 250) prefixTimeoutMs = 250;
+    if (prefixTimeoutMs > 10000) prefixTimeoutMs = 10000;
+
+    scrollLines = GetPrivateProfileIntW(L"input", L"scroll_lines", 0, path.c_str());
+    if (scrollLines < 0) scrollLines = 0;
+    if (scrollLines > 100) scrollLines = 100;
+
+    idleScrambleMinutes = GetPrivateProfileIntW(L"input", L"idle_scramble_minutes", 5, path.c_str());
+    if (idleScrambleMinutes < 0) idleScrambleMinutes = 0;
+    if (idleScrambleMinutes > 240) idleScrambleMinutes = 240;
 }
 
 void Settings::Save() const {
@@ -79,4 +92,16 @@ void Settings::Save() const {
 
     swprintf_s(buf, L"%06X", backgroundColor);
     WritePrivateProfileStringW(L"appearance", L"background_color", buf, path.c_str());
+
+    swprintf_s(buf, L"%d", showPrefixOverlay ? 1 : 0);
+    WritePrivateProfileStringW(L"appearance", L"show_prefix_overlay", buf, path.c_str());
+
+    swprintf_s(buf, L"%d", prefixTimeoutMs);
+    WritePrivateProfileStringW(L"input", L"prefix_timeout_ms", buf, path.c_str());
+
+    swprintf_s(buf, L"%d", scrollLines);
+    WritePrivateProfileStringW(L"input", L"scroll_lines", buf, path.c_str());
+
+    swprintf_s(buf, L"%d", idleScrambleMinutes);
+    WritePrivateProfileStringW(L"input", L"idle_scramble_minutes", buf, path.c_str());
 }

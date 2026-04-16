@@ -64,13 +64,34 @@ bool PaneManager::SplitActive(SplitDirection dir, HWND hwnd, UINT ptyMsg,
     newBranch->second->pane = std::make_unique<Pane>();
     newBranch->second->parent = newBranch.get();
 
-    // Start new pane (size will be corrected by Relayout)
-    if (!newBranch->second->pane->Start(10, 5, hwnd, ptyMsg, L"",
+    // Calculate correct size for new pane before starting
+    constexpr float PADDING = 8.0f;
+    int newCols = 10, newRows = 5;
+
+    if (dir == SplitDirection::Vertical) {
+        float half = (availW - SEP_WIDTH) / 2.0f;
+        float availNewW = half - PADDING;
+        float availNewH = availH - PADDING;
+        newCols = (std::max)(1, static_cast<int>(availNewW / cellWidth));
+        newRows = (std::max)(1, static_cast<int>(availNewH / cellHeight));
+    } else {
+        float half = (availH - SEP_WIDTH) / 2.0f;
+        float availNewW = availW - PADDING;
+        float availNewH = half - PADDING;
+        newCols = (std::max)(1, static_cast<int>(availNewW / cellWidth));
+        newRows = (std::max)(1, static_cast<int>(availNewH / cellHeight));
+    }
+
+    // Start new pane with correct size
+    OutputDebugStringA("[PaneManager::SplitActive] Starting new pane...\n");
+    if (!newBranch->second->pane->Start(newCols, newRows, hwnd, ptyMsg, L"",
                                          newBranch->second->paneId, workingDir)) {
         // Restore old pane
         oldLeaf->pane = std::move(newBranch->first->pane);
+        OutputDebugStringA("[PaneManager::SplitActive] Failed to start new pane\n");
         return false;
     }
+    OutputDebugStringA("[PaneManager::SplitActive] New pane started, setting as active\n");
 
     // Replace in tree
     SplitNode* parent = oldLeaf->parent;
@@ -85,6 +106,7 @@ bool PaneManager::SplitActive(SplitDirection dir, HWND hwnd, UINT ptyMsg,
     }
 
     m_activeNode = branchPtr->second.get();
+    OutputDebugStringA("[PaneManager::SplitActive] Active node changed to new pane\n");
 
     LayoutNode(m_root.get(), m_fullRect, cellWidth, cellHeight);
     return true;

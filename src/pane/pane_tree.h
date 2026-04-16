@@ -46,6 +46,7 @@ public:
     void MoveFocus(SplitDirection dir, bool forward);
     void ToggleZoom();
     bool IsZoomed() const { return m_zoomed; }
+    bool HasSinglePane() const { return m_root && m_root->IsLeaf(); }
 
     // Alt+Arrow: Move pane in direction (tree restructuring)
     void MovePane(SplitDirection dir, bool forward);

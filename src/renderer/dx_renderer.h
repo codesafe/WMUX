@@ -4,6 +4,7 @@
 #include <wrl/client.h>
 #include <array>
 #include <string>
+#include <map>
 #include "terminal/buffer.h"
 
 using Microsoft::WRL::ComPtr;
@@ -22,14 +23,27 @@ public:
 
     // Multi-pane rendering
     bool BeginFrame();
-    struct Selection { int startRow, startCol, endRow, endCol; bool active; };
+    struct Selection {
+        int startDocumentRow, startCol;
+        int endDocumentRow, endCol;
+        bool active;
+    };
+    struct IdleEffect {
+        bool active = false;
+        uint32_t frame = 0;
+        const std::map<std::pair<int, int>, Cell>* scrambledCells = nullptr;
+    };
 
     void RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
                     bool isActive, bool isZoomed, bool scrollbarDragging = false,
-                    const Selection* sel = nullptr, bool dimInactive = true);
+                    const Selection* sel = nullptr, bool dimInactive = true,
+                    const IdleEffect* idleEffect = nullptr);
     void RenderSeparator(float x1, float y1, float x2, float y2);
-    void RenderStatusBar(float y, float width, const std::wstring& text);
+    void RenderStatusBar(float y, float width, const std::wstring& leftText,
+                         const std::wstring& rightText = L"", bool isZoomed = false);
+    void RenderZoomBorder(float width, float height);
     void RenderPrefixIndicator();
+    void RenderPrefixOverlay(const std::wstring& text);
     void EndFrame();
 
     float GetStatusBarHeight() const { return m_cellHeight + 4.0f; }
@@ -44,6 +58,7 @@ private:
     bool CreateDeviceResources();
     void DiscardDeviceResources();
     bool MeasureCellSize();
+    float MeasureTextWidth(const std::wstring& text) const;
     void InitPalette();
 
     D2D1_COLOR_F GetCellFgColor(const Cell& cell) const;

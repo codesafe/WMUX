@@ -1,5 +1,86 @@
 #include "pty/conpty.h"
+#include <winternl.h>
 #include <vector>
+#include <condition_variable>
+
+namespace {
+struct CurDirInfo {
+    UNICODE_STRING DosPath;
+    HANDLE Handle;
+};
+
+struct RtlUserProcessParametersPartial {
+    ULONG MaximumLength;
+    ULONG Length;
+    ULONG Flags;
+    ULONG DebugFlags;
+    HANDLE ConsoleHandle;
+    ULONG ConsoleFlags;
+    HANDLE StandardInput;
+    HANDLE StandardOutput;
+    HANDLE StandardError;
+    CurDirInfo CurrentDirectory;
+};
+
+struct PebPartial {
+    BYTE Reserved1[2];
+    BYTE BeingDebugged;
+    BYTE Reserved2[1];
+    PVOID Reserved3[2];
+    RtlUserProcessParametersPartial* ProcessParameters;
+};
+
+using NtQueryInformationProcessFn =
+    NTSTATUS (NTAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+
+bool QueryProcessWorkingDirectory(HANDLE process, std::wstring& outPath) {
+    if (!process)
+        return false;
+
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll)
+        return false;
+
+    auto ntQueryInformationProcess = reinterpret_cast<NtQueryInformationProcessFn>(
+        GetProcAddress(ntdll, "NtQueryInformationProcess"));
+    if (!ntQueryInformationProcess)
+        return false;
+
+    PROCESS_BASIC_INFORMATION pbi = {};
+    NTSTATUS status = ntQueryInformationProcess(
+        process, ProcessBasicInformation, &pbi, sizeof(pbi), nullptr);
+    if (status < 0 || !pbi.PebBaseAddress)
+        return false;
+
+    PebPartial peb = {};
+    SIZE_T bytesRead = 0;
+    if (!ReadProcessMemory(process, pbi.PebBaseAddress, &peb, sizeof(peb), &bytesRead) ||
+        bytesRead < sizeof(peb) || !peb.ProcessParameters) {
+        return false;
+    }
+
+    RtlUserProcessParametersPartial params = {};
+    bytesRead = 0;
+    if (!ReadProcessMemory(process, peb.ProcessParameters, &params, sizeof(params), &bytesRead) ||
+        bytesRead < sizeof(params)) {
+        return false;
+    }
+
+    const UNICODE_STRING& cwd = params.CurrentDirectory.DosPath;
+    if (!cwd.Buffer || cwd.Length == 0 || (cwd.Length % sizeof(wchar_t)) != 0)
+        return false;
+
+    std::wstring path(cwd.Length / sizeof(wchar_t), L'\0');
+    bytesRead = 0;
+    if (!ReadProcessMemory(process, cwd.Buffer, path.data(), cwd.Length, &bytesRead) ||
+        bytesRead < cwd.Length) {
+        return false;
+    }
+
+    outPath = std::move(path);
+    return true;
+}
+}
 
 ConPty::~ConPty() {
     Stop();
@@ -102,11 +183,27 @@ bool ConPty::Start(int cols, int rows, HWND notifyHwnd, UINT notifyMsg,
     }
 
     m_running = true;
+    m_ready = false;
     m_readerThread = std::thread(&ConPty::ReaderThread, this);
 
     // Monitor child process exit: close pseudo console to unblock ReadFile
     RegisterWaitForSingleObject(&m_processWaitHandle, m_pi.hProcess,
         ProcessExitCallback, this, INFINITE, WT_EXECUTEONLYONCE);
+
+    // Wait for first output (shell prompt) with timeout to ensure PTY is ready
+    // Use longer timeout for slower shells like PowerShell (2 seconds)
+    {
+        std::unique_lock<std::mutex> lock(m_readyMutex);
+        bool ready = m_readyCv.wait_for(lock, std::chrono::milliseconds(2000),
+                                        [this] { return m_ready.load(); });
+
+        // Debug: log if timeout occurred
+        if (!ready) {
+            OutputDebugStringA("[ConPty] Warning: Timed out waiting for first output\n");
+        } else {
+            OutputDebugStringA("[ConPty] Ready: First output received\n");
+        }
+    }
 
     return true;
 }
@@ -169,6 +266,12 @@ void ConPty::Resize(int cols, int rows) {
     }
 }
 
+void ConPty::RefreshWorkingDirectory() {
+    std::wstring currentDir;
+    if (QueryProcessWorkingDirectory(m_pi.hProcess, currentDir) && !currentDir.empty())
+        m_workingDirectory = std::move(currentDir);
+}
+
 std::string ConPty::ConsumeOutput() {
     std::lock_guard<std::mutex> lock(m_outputMutex);
     std::string data = std::move(m_outputBuffer);
@@ -179,12 +282,25 @@ std::string ConPty::ConsumeOutput() {
 void ConPty::ReaderThread() {
     char buf[4096];
     DWORD bytesRead;
+    bool firstOutput = true;
+    OutputDebugStringA("[ConPty::ReaderThread] Started\n");
+
     while (m_running) {
         BOOL ok = ReadFile(m_pipeRead, buf, sizeof(buf), &bytesRead, nullptr);
         if (ok && bytesRead > 0) {
             {
                 std::lock_guard<std::mutex> lock(m_outputMutex);
                 m_outputBuffer.append(buf, bytesRead);
+            }
+            // Signal ready on first output (shell prompt appeared)
+            if (firstOutput) {
+                firstOutput = false;
+                {
+                    std::lock_guard<std::mutex> lock(m_readyMutex);
+                    m_ready = true;
+                }
+                m_readyCv.notify_one();
+                OutputDebugStringA("[ConPty::ReaderThread] First output received, signaling ready\n");
             }
             if (m_notifyHwnd)
                 PostMessage(m_notifyHwnd, m_notifyMsg, 0, m_notifyLParam);
@@ -193,6 +309,7 @@ void ConPty::ReaderThread() {
         }
     }
     m_running = false;
+    OutputDebugStringA("[ConPty::ReaderThread] Exiting\n");
     if (m_notifyHwnd)
         PostMessage(m_notifyHwnd, m_notifyMsg, 1, m_notifyLParam);
 }

@@ -491,28 +491,44 @@ void TerminalBuffer::ClampCursor() {
 }
 
 const Cell& TerminalBuffer::ViewAt(int viewRow, int col) const {
+    int documentRow = static_cast<int>(m_scrollback.size()) - m_scrollOffset + viewRow;
+    return CellAtDocumentRow(documentRow, col);
+}
+
+const Cell& TerminalBuffer::CellAtDocumentRow(int documentRow, int col) const {
     static const Cell empty{};
-    if (m_scrollOffset == 0)
-        return At(viewRow, col);
-
-    int sbSize = static_cast<int>(m_scrollback.size());
-    int lineIdx = sbSize - m_scrollOffset + viewRow;
-
-    if (lineIdx < 0)
+    if (documentRow < 0 || col < 0 || col >= m_cols)
         return empty;
 
-    if (lineIdx < sbSize) {
-        auto& line = m_scrollback[lineIdx];
+    int sbSize = static_cast<int>(m_scrollback.size());
+    if (documentRow < sbSize) {
+        auto& line = m_scrollback[documentRow];
         if (col < static_cast<int>(line.size()))
             return line[col];
         return empty;
     }
 
-    int bufRow = lineIdx - sbSize;
+    int bufRow = documentRow - sbSize;
     if (bufRow >= 0 && bufRow < m_rows)
         return At(bufRow, col);
 
     return empty;
+}
+
+int TerminalBuffer::ViewRowToDocumentRow(int viewRow) const {
+    if (m_rows <= 0)
+        return 0;
+
+    int clampedViewRow = (std::max)(0, (std::min)(viewRow, m_rows - 1));
+    int firstVisibleRow = static_cast<int>(m_scrollback.size()) - m_scrollOffset;
+    int documentRow = firstVisibleRow + clampedViewRow;
+    int maxDocumentRow = GetDocumentRowCount() - 1;
+    return (std::max)(0, (std::min)(documentRow, maxDocumentRow));
+}
+
+int TerminalBuffer::DocumentRowToViewRow(int documentRow) const {
+    int firstVisibleRow = static_cast<int>(m_scrollback.size()) - m_scrollOffset;
+    return documentRow - firstVisibleRow;
 }
 
 void TerminalBuffer::ScrollBack(int lines) {

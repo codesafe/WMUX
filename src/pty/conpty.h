@@ -20,10 +20,13 @@ public:
     void Stop();
     void Write(const char* data, size_t len);
     void Resize(int cols, int rows);
+    void RefreshWorkingDirectory();
 
     std::string ConsumeOutput();
     bool IsRunning() const { return m_running.load(); }
+    bool IsReady() const { return m_ready.load(); }
     std::wstring GetWorkingDirectory() const { return m_workingDirectory; }
+    void SetWorkingDirectory(const std::wstring& workingDirectory) { m_workingDirectory = workingDirectory; }
 
 private:
     void ReaderThread();
@@ -37,9 +40,12 @@ private:
 
     std::thread m_readerThread;
     std::atomic<bool> m_running{false};
+    std::atomic<bool> m_ready{false};
 
     std::mutex m_outputMutex;
     std::string m_outputBuffer;
+    std::condition_variable m_readyCv;
+    std::mutex m_readyMutex;
 
     HWND m_notifyHwnd = nullptr;
     UINT m_notifyMsg = 0;
