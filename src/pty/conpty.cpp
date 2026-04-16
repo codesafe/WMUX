@@ -194,15 +194,8 @@ bool ConPty::Start(int cols, int rows, HWND notifyHwnd, UINT notifyMsg,
     // Use longer timeout for slower shells like PowerShell (2 seconds)
     {
         std::unique_lock<std::mutex> lock(m_readyMutex);
-        bool ready = m_readyCv.wait_for(lock, std::chrono::milliseconds(2000),
-                                        [this] { return m_ready.load(); });
-
-        // Debug: log if timeout occurred
-        if (!ready) {
-            OutputDebugStringA("[ConPty] Warning: Timed out waiting for first output\n");
-        } else {
-            OutputDebugStringA("[ConPty] Ready: First output received\n");
-        }
+        m_readyCv.wait_for(lock, std::chrono::milliseconds(2000),
+                          [this] { return m_ready.load(); });
     }
 
     return true;
@@ -283,7 +276,6 @@ void ConPty::ReaderThread() {
     char buf[4096];
     DWORD bytesRead;
     bool firstOutput = true;
-    OutputDebugStringA("[ConPty::ReaderThread] Started\n");
 
     while (m_running) {
         BOOL ok = ReadFile(m_pipeRead, buf, sizeof(buf), &bytesRead, nullptr);
@@ -300,7 +292,6 @@ void ConPty::ReaderThread() {
                     m_ready = true;
                 }
                 m_readyCv.notify_one();
-                OutputDebugStringA("[ConPty::ReaderThread] First output received, signaling ready\n");
             }
             if (m_notifyHwnd)
                 PostMessage(m_notifyHwnd, m_notifyMsg, 0, m_notifyLParam);
@@ -309,7 +300,6 @@ void ConPty::ReaderThread() {
         }
     }
     m_running = false;
-    OutputDebugStringA("[ConPty::ReaderThread] Exiting\n");
     if (m_notifyHwnd)
         PostMessage(m_notifyHwnd, m_notifyMsg, 1, m_notifyLParam);
 }

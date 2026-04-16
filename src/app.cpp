@@ -131,6 +131,12 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_ERASEBKGND:
         return 1;
 
+    case WM_SYSCOMMAND:
+        // Block system menu (Alt+Space and title bar icon click)
+        if ((wParam & 0xFFF0) == SC_KEYMENU || (wParam & 0xFFF0) == SC_MOUSEMENU)
+            return 0;
+        break;
+
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
         RegisterUserActivity();
@@ -282,6 +288,10 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         RegisterUserActivity();
         OnRButtonUp(static_cast<int>(static_cast<short>(LOWORD(lParam))),
                     static_cast<int>(static_cast<short>(HIWORD(lParam))));
+        return 0;
+
+    case WM_NCRBUTTONDOWN:
+        // Block right-click on title bar (system menu)
         return 0;
 
     case WM_TIMER:

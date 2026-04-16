@@ -103,35 +103,19 @@ void Pane::ProcessOutput() {
 
 void Pane::SendInput(const char* data, size_t len) {
     if (!m_pty.IsReady()) {
-        // Buffer input if not ready yet
         std::lock_guard<std::mutex> lock(m_pendingInputMutex);
         m_pendingInput.push(std::string(data, len));
-        char msg[256];
-        sprintf_s(msg, "[Pane::SendInput] Buffering %zu bytes (not ready yet), queue size: %zu\n",
-                  len, m_pendingInput.size());
-        OutputDebugStringA(msg);
         return;
     }
-    char msg[256];
-    sprintf_s(msg, "[Pane::SendInput] Sending %zu bytes directly (ready)\n", len);
-    OutputDebugStringA(msg);
     m_pty.Write(data, len);
 }
 
 void Pane::SendInput(const std::string& data) {
     if (!m_pty.IsReady()) {
-        // Buffer input if not ready yet
         std::lock_guard<std::mutex> lock(m_pendingInputMutex);
         m_pendingInput.push(data);
-        char msg[256];
-        sprintf_s(msg, "[Pane::SendInput(string)] Buffering %zu bytes (not ready yet), queue size: %zu\n",
-                  data.size(), m_pendingInput.size());
-        OutputDebugStringA(msg);
         return;
     }
-    char msg[256];
-    sprintf_s(msg, "[Pane::SendInput(string)] Sending %zu bytes directly (ready)\n", data.size());
-    OutputDebugStringA(msg);
     m_pty.Write(data.c_str(), data.size());
 }
 
@@ -140,7 +124,6 @@ void Pane::FlushPendingInput() {
     if (m_pendingInput.empty())
         return;
 
-    OutputDebugStringA("[Pane::FlushPendingInput] Flushing buffered input\n");
     while (!m_pendingInput.empty()) {
         const std::string& data = m_pendingInput.front();
         m_pty.Write(data.c_str(), data.size());
@@ -150,15 +133,6 @@ void Pane::FlushPendingInput() {
 
 void Pane::TryFlushPendingInput() {
     if (m_pty.IsReady()) {
-        {
-            std::lock_guard<std::mutex> lock(m_pendingInputMutex);
-            if (!m_pendingInput.empty()) {
-                char msg[256];
-                sprintf_s(msg, "[Pane::TryFlushPendingInput] Ready! Flushing %zu buffered inputs\n",
-                          m_pendingInput.size());
-                OutputDebugStringA(msg);
-            }
-        }
         FlushPendingInput();
     }
 }

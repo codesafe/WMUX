@@ -83,15 +83,12 @@ bool PaneManager::SplitActive(SplitDirection dir, HWND hwnd, UINT ptyMsg,
     }
 
     // Start new pane with correct size
-    OutputDebugStringA("[PaneManager::SplitActive] Starting new pane...\n");
     if (!newBranch->second->pane->Start(newCols, newRows, hwnd, ptyMsg, L"",
                                          newBranch->second->paneId, workingDir)) {
         // Restore old pane
         oldLeaf->pane = std::move(newBranch->first->pane);
-        OutputDebugStringA("[PaneManager::SplitActive] Failed to start new pane\n");
         return false;
     }
-    OutputDebugStringA("[PaneManager::SplitActive] New pane started, setting as active\n");
 
     // Replace in tree
     SplitNode* parent = oldLeaf->parent;
@@ -106,7 +103,6 @@ bool PaneManager::SplitActive(SplitDirection dir, HWND hwnd, UINT ptyMsg,
     }
 
     m_activeNode = branchPtr->second.get();
-    OutputDebugStringA("[PaneManager::SplitActive] Active node changed to new pane\n");
 
     LayoutNode(m_root.get(), m_fullRect, cellWidth, cellHeight);
     return true;
