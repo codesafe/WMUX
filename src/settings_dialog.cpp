@@ -2,13 +2,17 @@
 #include <vector>
 #include <string>
 #include <CommCtrl.h>
+#include <commdlg.h>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 static const int ID_FONT_COMBO = 101;
 static const int ID_FONT_SIZE  = 102;
 static const int ID_WIN_W      = 103;
 static const int ID_WIN_H      = 104;
+static const int ID_DIM_INACTIVE = 105;
+static const int ID_BG_COLOR_BTN = 106;
 static const int ID_OK         = IDOK;
 static const int ID_CANCEL     = IDCANCEL;
 
@@ -18,6 +22,11 @@ struct DialogData {
     HWND hFontSize;
     HWND hWinW;
     HWND hWinH;
+    HWND hDimInactive;
+    HWND hBgColorBtn;
+    uint32_t bgColor;
+    int result = 0;  // 0 = Cancel, 1 = OK
+    bool closing = false;  // Prevent double-processing of OK/Cancel
 };
 
 static int CALLBACK EnumFontProc(const LOGFONTW* lf, const TEXTMETRICW*,
@@ -65,7 +74,7 @@ static HWND CreateEdit(HWND parent, const wchar_t* text, int id, int x, int y, i
 }
 
 static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    auto* data = reinterpret_cast<DialogData*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+    DialogData* data = reinterpret_cast<DialogData*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
 
     switch (msg) {
     case WM_CREATE: {
@@ -117,8 +126,27 @@ static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         data->hWinH = CreateEdit(hwnd, buf, ID_WIN_H, ex, y, 80, 24);
         SendMessage(data->hWinH, WM_SETFONT, (WPARAM)hFont, TRUE);
 
+        // Dim inactive panes checkbox
+        y += 40;
+        data->hDimInactive = CreateWindowExW(0, L"BUTTON", L"Dim inactive panes",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            lx, y, 200, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_DIM_INACTIVE)),
+            GetModuleHandle(nullptr), nullptr);
+        SendMessage(data->hDimInactive, WM_SETFONT, (WPARAM)hFont, TRUE);
+        SendMessage(data->hDimInactive, BM_SETCHECK,
+                    data->settings->dimInactivePanes ? BST_CHECKED : BST_UNCHECKED, 0);
+
+        // Background color
+        y += 35;
+        CreateLabel(hwnd, L"Background Color:", lx, y + 3, 110, 20);
+        data->hBgColorBtn = CreateWindowExW(0, L"BUTTON", L"",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            ex, y, 60, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_BG_COLOR_BTN)),
+            GetModuleHandle(nullptr), nullptr);
+        data->bgColor = data->settings->backgroundColor;
+
         // Buttons
-        y += 50;
+        y += 45;
         HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
             130, y, 80, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_OK)),
@@ -142,9 +170,65 @@ static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         return 0;
     }
 
+    case WM_DRAWITEM: {
+        if (!data) break;
+        auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+        if (dis->CtlID == ID_BG_COLOR_BTN) {
+            // Draw color button
+            HBRUSH hBrush = CreateSolidBrush(RGB(
+                (data->bgColor >> 16) & 0xFF,
+                (data->bgColor >> 8) & 0xFF,
+                data->bgColor & 0xFF));
+            FillRect(dis->hDC, &dis->rcItem, hBrush);
+            DeleteObject(hBrush);
+
+            // Draw border
+            HPEN hPen = CreatePen(PS_SOLID, 1, RGB(80, 80, 80));
+            HPEN hOldPen = (HPEN)SelectObject(dis->hDC, hPen);
+            HBRUSH hOldBrush = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+            Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top,
+                      dis->rcItem.right, dis->rcItem.bottom);
+            SelectObject(dis->hDC, hOldPen);
+            SelectObject(dis->hDC, hOldBrush);
+            DeleteObject(hPen);
+            return TRUE;
+        }
+        break;
+    }
+
     case WM_COMMAND:
+        if (!data) break;
+        // Only handle button clicks (BN_CLICKED), ignore other notifications
+        if (HIWORD(wParam) != BN_CLICKED && HIWORD(wParam) != 0) break;
         switch (LOWORD(wParam)) {
+        case ID_BG_COLOR_BTN: {
+            if (HIWORD(wParam) != BN_CLICKED) break;
+
+            // Show color picker dialog
+            CHOOSECOLOR cc = {};
+            static COLORREF customColors[16] = {};
+            cc.lStructSize = sizeof(cc);
+            cc.hwndOwner = hwnd;
+            cc.lpCustColors = customColors;
+            cc.rgbResult = RGB(
+                (data->bgColor >> 16) & 0xFF,
+                (data->bgColor >> 8) & 0xFF,
+                data->bgColor & 0xFF);
+            cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+
+            if (ChooseColor(&cc)) {
+                data->bgColor = ((GetRValue(cc.rgbResult) << 16) |
+                                 (GetGValue(cc.rgbResult) << 8) |
+                                 GetBValue(cc.rgbResult));
+                InvalidateRect(data->hBgColorBtn, nullptr, TRUE);
+            }
+            return 0;
+        }
         case ID_OK: {
+            if (HIWORD(wParam) != BN_CLICKED && HIWORD(wParam) != 0) break;
+            if (data->closing) return 0;  // Already processing close
+            data->closing = true;
+
             // Read values
             wchar_t buf[256];
 
@@ -166,21 +250,33 @@ static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             int h = _wtoi(buf);
             if (h >= 150) data->settings->windowHeight = h;
 
+            data->settings->dimInactivePanes =
+                (SendMessage(data->hDimInactive, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+            data->settings->backgroundColor = data->bgColor;
+
             data->settings->Save();
-            PostQuitMessage(1);  // 1 = OK
+            data->result = 1;  // OK
             DestroyWindow(hwnd);
             return 0;
         }
         case ID_CANCEL:
-            PostQuitMessage(0);  // 0 = Cancel
+            if (HIWORD(wParam) != BN_CLICKED && HIWORD(wParam) != 0) break;
+            if (data->closing) return 0;  // Already processing close
+            data->closing = true;
+            data->result = 0;  // Cancel
             DestroyWindow(hwnd);
             return 0;
         }
-        break;
+        return 0;  // Message handled
 
     case WM_CLOSE:
-        PostQuitMessage(0);  // Treat close button as Cancel
+        if (data) data->result = 0;  // Treat close button as Cancel
         DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        if (data) PostQuitMessage(data->result);
         return 0;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
@@ -204,7 +300,7 @@ bool ShowSettingsDialog(HWND parent, Settings& settings) {
     Settings copy = settings;
     DialogData data = {&copy};
 
-    int dlgW = 380, dlgH = 260;
+    int dlgW = 380, dlgH = 335;
     RECT parentRect;
     GetWindowRect(parent, &parentRect);
     int x = parentRect.left + (parentRect.right - parentRect.left - dlgW) / 2;

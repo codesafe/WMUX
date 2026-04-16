@@ -8,6 +8,8 @@ struct Settings {
     float fontSize = 14.0f;
     int windowWidth = 1200;
     int windowHeight = 800;
+    bool dimInactivePanes = true;  // Dim inactive panes by default
+    uint32_t backgroundColor = 0x1E1E1E;  // RGB background color (default: dark gray)
 
     void Load();
     void Save() const;

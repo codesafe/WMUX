@@ -14,8 +14,9 @@ public:
     ~DxRenderer() = default;
 
     bool Initialize(HWND hwnd, const std::wstring& fontName = L"Consolas",
-                    float fontSize = 14.0f);
+                    float fontSize = 14.0f, uint32_t bgColor = 0x1E1E1E);
     bool UpdateFont(const std::wstring& fontName, float fontSize);
+    void SetBackgroundColor(uint32_t rgb);
     void Resize(UINT width, UINT height);
     void Render(const TerminalBuffer& buffer);
 
@@ -25,7 +26,7 @@ public:
 
     void RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
                     bool isActive, bool isZoomed, bool scrollbarDragging = false,
-                    const Selection* sel = nullptr);
+                    const Selection* sel = nullptr, bool dimInactive = true);
     void RenderSeparator(float x1, float y1, float x2, float y2);
     void RenderStatusBar(float y, float width, const std::wstring& text);
     void RenderPrefixIndicator();

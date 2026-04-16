@@ -1,5 +1,12 @@
 #include "app.h"
 #include "settings_dialog.h"
+#include <imm.h>
+
+#pragma comment(lib, "imm32.lib")
+
+#ifndef VK_PROCESSKEY
+#define VK_PROCESSKEY 0xE5
+#endif
 
 bool App::Initialize(HINSTANCE hInstance, int nCmdShow) {
     m_hInstance = hInstance;
@@ -28,7 +35,8 @@ bool App::Initialize(HINSTANCE hInstance, int nCmdShow) {
     if (!m_hwnd)
         return false;
 
-    if (!m_renderer.Initialize(m_hwnd, m_settings.fontName, m_settings.fontSize))
+    if (!m_renderer.Initialize(m_hwnd, m_settings.fontName, m_settings.fontSize,
+                                m_settings.backgroundColor))
         return false;
 
     RECT rc;
@@ -103,6 +111,71 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         OnChar(static_cast<wchar_t>(wParam));
         return 0;
 
+    case WM_IME_COMPOSITION:
+        // In PREFIX mode, intercept Korean IME composition to handle commands immediately
+        if (m_inputMode == InputMode::Prefix && (lParam & GCS_COMPSTR)) {
+            HIMC hImc = ImmGetContext(m_hwnd);
+            if (hImc) {
+                wchar_t buf[8] = {};
+                LONG len = ImmGetCompositionStringW(hImc, GCS_COMPSTR, buf, sizeof(buf));
+                if (len > 0 && buf[0] != 0) {
+                    wchar_t korChar = buf[0];
+
+                    // Map Korean Hangul to English commands
+                    wchar_t cmd = 0;
+                    switch (korChar) {
+                    case 0x3157: cmd = 'h'; break;  // ㅗ -> h (horizontal split)
+                    case 0x314F: cmd = 'h'; break;  // ㅗ -> h (horizontal split)
+                    case 0x314D: cmd = 'v'; break;  // ㅍ -> v (vertical split)
+                    case 0x314C: cmd = 'x'; break;  // ㅌ -> x (close)
+                    case 0x314B: cmd = 'z'; break;  // ㅋ -> z (zoom)
+                    case 0x3150: cmd = 'o'; break;  // ㅐ -> o (options)
+                    }
+
+                    // Cancel IME composition
+                    ImmNotifyIME(hImc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+                    ImmReleaseContext(m_hwnd, hImc);
+
+                    if (cmd != 0) {
+                        // Execute command directly
+                        m_inputMode = InputMode::Normal;
+                        UpdateTitleBar();
+
+                        switch (cmd) {
+                        case 'v':
+                            SplitActivePane(SplitDirection::Vertical);
+                            break;
+                        case 'h':
+                            SplitActivePane(SplitDirection::Horizontal);
+                            break;
+                        case 'x':
+                            CloseActivePane();
+                            break;
+                        case 'z':
+                            m_paneManager.ToggleZoom();
+                            if (!m_paneManager.IsZoomed()) {
+                                RECT rc;
+                                GetClientRect(m_hwnd, &rc);
+                                float sH = m_renderer.GetStatusBarHeight();
+                                D2D1_RECT_F clientRect = {0, 0, static_cast<float>(rc.right),
+                                                           static_cast<float>(rc.bottom) - sH};
+                                m_paneManager.Relayout(clientRect, m_renderer.GetCellWidth(),
+                                                       m_renderer.GetCellHeight());
+                            }
+                            break;
+                        case 'o':
+                            OpenSettings();
+                            break;
+                        }
+                        InvalidateRect(m_hwnd, nullptr, FALSE);
+                        return 0;
+                    }
+                }
+                ImmReleaseContext(m_hwnd, hImc);
+            }
+        }
+        return DefWindowProc(m_hwnd, msg, wParam, lParam);
+
     case WM_MOUSEWHEEL:
         OnMouseWheel(wParam, lParam);
         return 0;
@@ -139,7 +212,7 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_LBUTTONUP:
-        if (m_draggingScrollbar || m_selecting)
+        if (m_draggingSeparator || m_draggingScrollbar || m_selecting)
             OnLButtonUp();
         return 0;
 
@@ -204,7 +277,7 @@ void App::OnPaint() {
                 sel = {m_selStartRow, m_selStartCol, m_selEndRow, m_selEndCol, true};
                 pSel = &sel;
             }
-            m_renderer.RenderPane(node->pane->GetBuffer(), fullRect, true, true, dragging, pSel);
+            m_renderer.RenderPane(node->pane->GetBuffer(), fullRect, true, true, dragging, pSel, m_settings.dimInactivePanes);
         }
     } else {
         SplitNode* activeNode = m_paneManager.GetActiveNode();
@@ -217,7 +290,7 @@ void App::OnPaint() {
                 sel = {m_selStartRow, m_selStartCol, m_selEndRow, m_selEndCol, true};
                 pSel = &sel;
             }
-            m_renderer.RenderPane(node.pane->GetBuffer(), node.rect, isActive, false, dragging, pSel);
+            m_renderer.RenderPane(node.pane->GetBuffer(), node.rect, isActive, false, dragging, pSel, m_settings.dimInactivePanes);
         });
 
         std::vector<PaneManager::SeparatorLine> seps;
@@ -287,10 +360,26 @@ void App::OnResize(UINT width, UINT height) {
 }
 
 void App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
+    bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
+    // Ctrl+B: enter prefix mode (check FIRST, before any other logic)
+    if (m_inputMode == InputMode::Normal && ctrl && vk == 'B') {
+        m_inputMode = InputMode::Prefix;
+        m_skipNextChar = true;  // Prevent WM_CHAR from sending ^B to terminal
+        UpdateTitleBar();
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+        return;
+    }
+
     // Prefix mode: handle all commands here (bypasses IME for Korean input)
     if (m_inputMode == InputMode::Prefix) {
+        // If VK_PROCESSKEY, IME is active - defer to OnChar for Korean compatibility
+        if (vk == VK_PROCESSKEY) {
+            return;
+        }
+
         bool handled = true;
-        bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
         // Arrow keys for pane navigation
         if (vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT) {
@@ -301,7 +390,7 @@ void App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
             case VK_RIGHT: m_paneManager.MoveFocus(SplitDirection::Vertical, true);    break;
             }
         }
-        // Character commands (VK code check bypasses IME)
+        // Character commands (only in English mode - Korean deferred to OnChar)
         else if (vk == 'V' || vk == '5') {  // v or % (both work)
             SplitActivePane(SplitDirection::Vertical);
         }
@@ -336,6 +425,7 @@ void App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
 
         if (handled) {
             m_inputMode = InputMode::Normal;
+            m_skipNextChar = true;  // Skip WM_CHAR in English mode
             UpdateTitleBar();
             InvalidateRect(m_hwnd, nullptr, FALSE);
         }
@@ -345,17 +435,6 @@ void App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
     // Normal mode
     Pane* active = m_paneManager.GetActivePane();
     if (!active) return;
-
-    bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-    bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-
-    // Ctrl+B: enter prefix mode (must be in OnKeyDown to bypass IME)
-    if (ctrl && vk == 'B') {
-        m_inputMode = InputMode::Prefix;
-        UpdateTitleBar();
-        InvalidateRect(m_hwnd, nullptr, FALSE);
-        return;
-    }
 
     // Ctrl+C: copy if selection exists, otherwise send SIGINT (0x03) via WM_CHAR
     if (ctrl && vk == 'C' && m_hasSelection) {
@@ -493,9 +572,18 @@ void App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
 }
 
 void App::OnChar(wchar_t ch) {
-    // Prefix key detection (now handled in OnKeyDown for IME compatibility)
+    // Skip character if already handled in OnKeyDown
+    if (m_skipNextChar) {
+        m_skipNextChar = false;
+        return;
+    }
+
+    // Prefix key detection (fallback if OnKeyDown missed it)
     if (m_inputMode == InputMode::Normal) {
-        if (ch == 0x02) { // Ctrl+B (already handled in OnKeyDown, skip)
+        if (ch == 0x02) { // Ctrl+B: enter prefix mode
+            m_inputMode = InputMode::Prefix;
+            UpdateTitleBar();
+            InvalidateRect(m_hwnd, nullptr, FALSE);
             return;
         }
         // Ctrl+V (0x16) handled in OnKeyDown
@@ -528,7 +616,28 @@ void App::OnChar(wchar_t ch) {
     m_inputMode = InputMode::Normal;
     UpdateTitleBar();
 
+    // Map Korean Hangul characters to English commands (for IME compatibility)
+    wchar_t cmd = ch;
     switch (ch) {
+    case 0x3157:
+    case 0x314F:  // ㅗ -> h
+        cmd = 'h';
+        break;
+    case 0x314D:  // ㅍ -> v
+        cmd = 'v';
+        break;
+    case 0x314C:  // ㅌ -> x
+        cmd = 'x';
+        break;
+    case 0x314B:  // ㅋ -> z
+        cmd = 'z';
+        break;
+    case 0x3150:  // ㅐ -> o
+        cmd = 'o';
+        break;
+    }
+
+    switch (cmd) {
     case 0x02: // Double Ctrl+B: send literal to pane
         if (auto* p = m_paneManager.GetActivePane())
             p->SendInput("\x02", 1);
@@ -928,6 +1037,7 @@ void App::PasteClipboard() {
 void App::OpenSettings() {
     if (ShowSettingsDialog(m_hwnd, m_settings)) {
         m_renderer.UpdateFont(m_settings.fontName, m_settings.fontSize);
+        m_renderer.SetBackgroundColor(m_settings.backgroundColor);
 
         RECT rc;
         GetClientRect(m_hwnd, &rc);

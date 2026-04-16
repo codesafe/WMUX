@@ -2,10 +2,11 @@
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
 
-bool DxRenderer::Initialize(HWND hwnd, const std::wstring& fontName, float fontSize) {
+bool DxRenderer::Initialize(HWND hwnd, const std::wstring& fontName, float fontSize, uint32_t bgColor) {
     m_hwnd = hwnd;
     m_fontName = fontName;
     m_fontSize = fontSize;
+    SetBackgroundColor(bgColor);
     InitPalette();
 
     HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
@@ -51,6 +52,14 @@ bool DxRenderer::UpdateFont(const std::wstring& fontName, float fontSize) {
     m_pTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
 
     return MeasureCellSize();
+}
+
+void DxRenderer::SetBackgroundColor(uint32_t rgb) {
+    m_defaultBg = D2D1::ColorF(
+        ((rgb >> 16) & 0xFF) / 255.0f,
+        ((rgb >> 8) & 0xFF) / 255.0f,
+        (rgb & 0xFF) / 255.0f,
+        1.0f);
 }
 
 bool DxRenderer::MeasureCellSize() {
@@ -259,7 +268,7 @@ static bool CellInSelection(int r, int c, const DxRenderer::Selection* sel) {
 
 void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
                              bool isActive, bool isZoomed, bool scrollbarDragging,
-                             const Selection* sel) {
+                             const Selection* sel, bool dimInactive) {
     m_pRenderTarget->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
 
     // Fill pane background
@@ -565,6 +574,12 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
         m_pRenderTarget->FillRectangle({rect.left, rect.bottom - t, rect.right, rect.bottom}, m_pBrush.Get());
         m_pRenderTarget->FillRectangle({rect.left, rect.top, rect.left + t, rect.bottom}, m_pBrush.Get());
         m_pRenderTarget->FillRectangle({rect.right - t, rect.top, rect.right, rect.bottom}, m_pBrush.Get());
+    }
+
+    // Dim inactive panes with semi-transparent overlay
+    if (!isActive && dimInactive) {
+        m_pBrush->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.35f));  // 35% black overlay
+        m_pRenderTarget->FillRectangle(rect, m_pBrush.Get());
     }
 
     m_pRenderTarget->PopAxisAlignedClip();

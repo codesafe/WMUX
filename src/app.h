@@ -53,6 +53,7 @@ private:
     PaneManager m_paneManager;
     InputMode m_inputMode = InputMode::Normal;
     Settings m_settings;
+    bool m_skipNextChar = false;  // Flag to skip WM_CHAR after handling in WM_KEYDOWN
 
     // Scrollbar drag state
     bool m_draggingScrollbar = false;

@@ -45,6 +45,14 @@ void Settings::Load() {
 
     windowHeight = GetPrivateProfileIntW(L"window", L"height", 800, path.c_str());
     if (windowHeight < 150) windowHeight = 150;
+
+    dimInactivePanes = GetPrivateProfileIntW(L"appearance", L"dim_inactive_panes", 1, path.c_str()) != 0;
+
+    // Background color as hex (e.g., "1E1E1E")
+    wchar_t colorBuf[16] = {};
+    GetPrivateProfileStringW(L"appearance", L"background_color", L"1E1E1E",
+                             colorBuf, 16, path.c_str());
+    backgroundColor = static_cast<uint32_t>(wcstoul(colorBuf, nullptr, 16));
 }
 
 void Settings::Save() const {
@@ -65,4 +73,10 @@ void Settings::Save() const {
 
     swprintf_s(buf, L"%d", windowHeight);
     WritePrivateProfileStringW(L"window", L"height", buf, path.c_str());
+
+    swprintf_s(buf, L"%d", dimInactivePanes ? 1 : 0);
+    WritePrivateProfileStringW(L"appearance", L"dim_inactive_panes", buf, path.c_str());
+
+    swprintf_s(buf, L"%06X", backgroundColor);
+    WritePrivateProfileStringW(L"appearance", L"background_color", buf, path.c_str());
 }
