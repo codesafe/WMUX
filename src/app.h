@@ -19,7 +19,7 @@ private:
 
     void OnPaint();
     void OnResize(UINT width, UINT height);
-    void OnKeyDown(WPARAM vk, LPARAM flags);
+    bool OnKeyDown(WPARAM vk, LPARAM flags);
     void OnChar(wchar_t ch);
     void OnMouseWheel(WPARAM wParam, LPARAM lParam);
     void OnLButtonDown(int x, int y);

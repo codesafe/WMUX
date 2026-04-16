@@ -45,6 +45,11 @@ public:
     void ToggleZoom();
     bool IsZoomed() const { return m_zoomed; }
 
+    // Alt+Arrow: Move pane in direction (tree restructuring)
+    void MovePane(SplitDirection dir, bool forward);
+    // Alt+Shift+Arrow: Swap pane content with neighbor
+    void SwapPaneContent(SplitDirection dir, bool forward);
+
     void Relayout(D2D1_RECT_F clientRect, float cellWidth, float cellHeight);
 
     Pane* FindPaneById(uint32_t id);
@@ -71,6 +76,11 @@ private:
     void ForEachLeafRecursive(SplitNode* node,
                                std::function<void(SplitNode&)>& fn);
     Pane* FindPaneByIdRecursive(SplitNode* node, uint32_t id);
+
+    // Helper: Find physical neighbor in screen direction
+    SplitNode* FindPhysicalNeighbor(SplitNode* from, SplitDirection dir, bool forward);
+    // Helper: Calculate overlap between two rects
+    float CalculateOverlap(D2D1_RECT_F r1, D2D1_RECT_F r2, SplitDirection dir);
 
     std::unique_ptr<SplitNode> m_root;
     SplitNode* m_activeNode = nullptr;

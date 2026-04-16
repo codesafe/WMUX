@@ -20,6 +20,7 @@ public:
     const TerminalBuffer& GetBuffer() const { return m_buffer; }
     ConPty& GetPty() { return m_pty; }
     bool IsRunning() const { return m_pty.IsRunning(); }
+    std::wstring GetWorkingDirectory() const { return m_pty.GetWorkingDirectory(); }
 
 private:
     ConPty m_pty;

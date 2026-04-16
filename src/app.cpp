@@ -104,11 +104,17 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         return 1;
 
     case WM_KEYDOWN:
-        OnKeyDown(wParam, lParam);
-        return 0;
+    case WM_SYSKEYDOWN:
+        if (OnKeyDown(wParam, lParam))
+            return 0;
+        break;
 
     case WM_CHAR:
         OnChar(static_cast<wchar_t>(wParam));
+        return 0;
+
+    case WM_IME_STARTCOMPOSITION:
+        // Prevent default IME composition window from appearing
         return 0;
 
     case WM_IME_COMPOSITION:
@@ -197,13 +203,17 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         if (m_draggingSeparator || m_draggingScrollbar || m_selecting) {
             OnMouseMove(mx, my);
         } else {
-            // Update cursor when hovering over separator
+            // Update cursor when hovering over separator or scrollbar
             SplitNode* node = nullptr;
+            Pane* pane = nullptr;
+            D2D1_RECT_F rect = {};
             if (HitTestSeparator(static_cast<float>(mx), static_cast<float>(my), node)) {
                 if (node->direction == SplitDirection::Vertical)
                     SetCursor(LoadCursor(nullptr, IDC_SIZEWE));
                 else
                     SetCursor(LoadCursor(nullptr, IDC_SIZENS));
+            } else if (HitTestScrollbar(static_cast<float>(mx), static_cast<float>(my), pane, rect)) {
+                SetCursor(LoadCursor(nullptr, IDC_ARROW));
             } else {
                 SetCursor(LoadCursor(nullptr, IDC_IBEAM));
             }
@@ -323,6 +333,22 @@ void App::OnPaint() {
         MultiByteToWideChar(CP_UTF8, 0, title.c_str(), -1, wtitle.data(), titleLen);
         if (!wtitle.empty() && wtitle.back() == L'\0') wtitle.pop_back();
 
+        // Get working directory and abbreviate if too long
+        std::wstring wdir = active->GetWorkingDirectory();
+        if (!wdir.empty()) {
+            // Abbreviate path if longer than 40 characters
+            if (wdir.length() > 40) {
+                // Show last 2 path components (e.g., ...\parent\current)
+                size_t lastSep = wdir.rfind(L'\\');
+                if (lastSep != std::wstring::npos && lastSep > 0) {
+                    size_t secondLastSep = wdir.rfind(L'\\', lastSep - 1);
+                    if (secondLastSep != std::wstring::npos) {
+                        wdir = L"...\\" + wdir.substr(secondLastSep + 1);
+                    }
+                }
+            }
+        }
+
         // Time
         SYSTEMTIME st;
         GetLocalTime(&st);
@@ -330,6 +356,9 @@ void App::OnPaint() {
         wsprintfW(timeBuf, L"%02d:%02d:%02d", st.wHour, st.wMinute, st.wSecond);
 
         statusText = L" [" + std::to_wstring(currentPaneIndex) + L"/" + std::to_wstring(paneCount) + L"] " + wtitle;
+        if (!wdir.empty()) {
+            statusText += L" | " + wdir;
+        }
         if (m_paneManager.IsZoomed()) statusText += L" [ZOOM]";
         if (m_inputMode == InputMode::Prefix) statusText += L" [PREFIX]";
 
@@ -359,9 +388,37 @@ void App::OnResize(UINT width, UINT height) {
                            m_renderer.GetCellHeight());
 }
 
-void App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
+bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
     bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+
+    // Alt+Arrow: Move pane in direction (tree restructuring)
+    // Alt+Shift+Arrow: Swap pane content with neighbor
+    if (alt && (vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT)) {
+        if (m_paneManager.IsZoomed()) return true; // No movement in zoom mode
+
+        SplitDirection dir = (vk == VK_LEFT || vk == VK_RIGHT)
+            ? SplitDirection::Vertical : SplitDirection::Horizontal;
+        bool forward = (vk == VK_RIGHT || vk == VK_DOWN);
+
+        if (shift) {
+            // Alt+Shift+Arrow: Swap content
+            m_paneManager.SwapPaneContent(dir, forward);
+        } else {
+            // Alt+Arrow: Move pane (requires relayout after tree restructuring)
+            m_paneManager.MovePane(dir, forward);
+            RECT rc;
+            GetClientRect(m_hwnd, &rc);
+            float statusH = m_renderer.GetStatusBarHeight();
+            float paneH = static_cast<float>(rc.bottom) - statusH;
+            D2D1_RECT_F paneRect = {0, 0, static_cast<float>(rc.right), paneH};
+            m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(),
+                                   m_renderer.GetCellHeight());
+        }
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+        return true;
+    }
 
     // Ctrl+B: enter prefix mode (check FIRST, before any other logic)
     if (m_inputMode == InputMode::Normal && ctrl && vk == 'B') {
@@ -369,14 +426,14 @@ void App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
         m_skipNextChar = true;  // Prevent WM_CHAR from sending ^B to terminal
         UpdateTitleBar();
         InvalidateRect(m_hwnd, nullptr, FALSE);
-        return;
+        return true;
     }
 
     // Prefix mode: handle all commands here (bypasses IME for Korean input)
     if (m_inputMode == InputMode::Prefix) {
         // If VK_PROCESSKEY, IME is active - defer to OnChar for Korean compatibility
         if (vk == VK_PROCESSKEY) {
-            return;
+            return true;
         }
 
         bool handled = true;
@@ -429,17 +486,17 @@ void App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
             UpdateTitleBar();
             InvalidateRect(m_hwnd, nullptr, FALSE);
         }
-        return;
+        return true;
     }
 
     // Normal mode
     Pane* active = m_paneManager.GetActivePane();
-    if (!active) return;
+    if (!active) return false;
 
     // Ctrl+C: copy if selection exists, otherwise send SIGINT (0x03) via WM_CHAR
     if (ctrl && vk == 'C' && m_hasSelection) {
         CopySelection();
-        return;
+        return true;
     }
     // Ctrl+A: select all visible content in active pane
     if (ctrl && vk == 'A') {
@@ -456,12 +513,47 @@ void App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
         m_hasSelection = true;
         m_selecting = false;
         InvalidateRect(m_hwnd, nullptr, FALSE);
-        return;
+        return true;
     }
-    // Ctrl+V: paste
-    if (ctrl && vk == 'V') {
+    // Ctrl+V: paste (only without Shift)
+    if (ctrl && !shift && vk == 'V') {
         PasteClipboard();
-        return;
+        return true;
+    }
+
+    // Ctrl+Shift+H/V/X/Z/O/Arrow: direct commands (no prefix needed)
+    if (ctrl && shift) {
+        bool handled = false;
+        if (vk == 'H' || vk == VK_DOWN) {
+            SplitActivePane(SplitDirection::Horizontal);
+            handled = true;
+        } else if (vk == 'V' || vk == VK_RIGHT) {
+            SplitActivePane(SplitDirection::Vertical);
+            handled = true;
+        } else if (vk == 'X') {
+            CloseActivePane();
+            handled = true;
+        } else if (vk == 'Z') {
+            m_paneManager.ToggleZoom();
+            if (!m_paneManager.IsZoomed()) {
+                RECT rc;
+                GetClientRect(m_hwnd, &rc);
+                float sH = m_renderer.GetStatusBarHeight();
+                D2D1_RECT_F clientRect = {0, 0, static_cast<float>(rc.right),
+                                           static_cast<float>(rc.bottom) - sH};
+                m_paneManager.Relayout(clientRect, m_renderer.GetCellWidth(),
+                                       m_renderer.GetCellHeight());
+            }
+            handled = true;
+        } else if (vk == 'O') {
+            OpenSettings();
+            handled = true;
+        }
+        if (handled) {
+            m_skipNextChar = true;  // Prevent WM_CHAR from sending control character
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+            return true;
+        }
     }
 
     // Shift+Arrow: keyboard text selection (Home/End pass through to shell)
@@ -505,7 +597,7 @@ void App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
             break;
         }
         InvalidateRect(m_hwnd, nullptr, FALSE);
-        return;
+        return true;
     }
 
     // Any non-shift arrow key clears keyboard selection
@@ -523,7 +615,7 @@ void App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
         else
             active->GetBuffer().ScrollForward(pageSize);
         InvalidateRect(m_hwnd, nullptr, FALSE);
-        return;
+        return true;
     }
 
     // Ctrl+Arrow: pane focus navigation
@@ -535,7 +627,7 @@ void App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
         case VK_RIGHT: m_paneManager.MoveFocus(SplitDirection::Vertical, true);    break;
         }
         InvalidateRect(m_hwnd, nullptr, FALSE);
-        return;
+        return true;
     }
 
     // Send VT sequences to active pane
@@ -565,16 +657,24 @@ void App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
     case VK_F10:    seq = "\x1b[21~"; break;
     case VK_F11:    seq = "\x1b[23~"; break;
     case VK_F12:    seq = "\x1b[24~"; break;
-    default: return;
+    default: return false;
     }
 
     active->SendInput(seq);
+    return true;
 }
 
 void App::OnChar(wchar_t ch) {
     // Skip character if already handled in OnKeyDown
     if (m_skipNextChar) {
         m_skipNextChar = false;
+        return;
+    }
+
+    // Ctrl+Shift combinations are wmux commands - never send to console
+    bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    if (ctrl && shift) {
         return;
     }
 
@@ -750,7 +850,7 @@ bool App::HitTestScrollbar(float px, float py, Pane*& outPane, D2D1_RECT_F& outR
     int sbSize = outPane->GetBuffer().GetScrollbackSize();
     if (sbSize <= 0) return false;
 
-    float barW = 8.0f;
+    float barW = 12.0f;
     float barX = outRect.right - barW;
     return px >= barX;
 }

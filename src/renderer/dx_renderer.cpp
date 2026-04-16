@@ -542,7 +542,7 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
     if (sbSize > 0) {
         int totalLines = sbSize + rows;
         float paneH = contentRect.bottom - contentRect.top;
-        float barW = 8.0f;
+        float barW = 12.0f;
         float barX = contentRect.right - barW;
 
         // Track background (semi-transparent)
@@ -558,7 +558,7 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
             : scrollRange;
 
         if (scrollbarDragging)
-            m_pBrush->SetColor({0.3f, 0.8f, 0.3f, 0.9f}); // bright green while dragging
+            m_pBrush->SetColor({0.2f, 0.4f, 0.8f, 0.9f}); // bright blue while dragging
         else
             m_pBrush->SetColor({0.7f, 0.7f, 0.7f, 0.6f});
         m_pRenderTarget->FillRectangle(

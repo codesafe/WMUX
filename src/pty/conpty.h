@@ -22,6 +22,7 @@ public:
 
     std::string ConsumeOutput();
     bool IsRunning() const { return m_running.load(); }
+    std::wstring GetWorkingDirectory() const { return m_workingDirectory; }
 
 private:
     void ReaderThread();
@@ -42,4 +43,6 @@ private:
     HWND m_notifyHwnd = nullptr;
     UINT m_notifyMsg = 0;
     LPARAM m_notifyLParam = 0;
+
+    std::wstring m_workingDirectory;
 };

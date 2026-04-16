@@ -387,3 +387,106 @@ void PaneManager::UpdateSplitRatio(SplitNode* node, float x, float y,
     // Relayout with provided cell dimensions
     LayoutNode(m_root.get(), m_fullRect, cellWidth, cellHeight);
 }
+
+float PaneManager::CalculateOverlap(D2D1_RECT_F r1, D2D1_RECT_F r2, SplitDirection dir) {
+    // Calculate overlap along the perpendicular axis
+    if (dir == SplitDirection::Vertical) {
+        // For horizontal movement, calculate vertical overlap
+        float top = (std::max)(r1.top, r2.top);
+        float bottom = (std::min)(r1.bottom, r2.bottom);
+        return (std::max)(0.0f, bottom - top);
+    } else {
+        // For vertical movement, calculate horizontal overlap
+        float left = (std::max)(r1.left, r2.left);
+        float right = (std::min)(r1.right, r2.right);
+        return (std::max)(0.0f, right - left);
+    }
+}
+
+SplitNode* PaneManager::FindPhysicalNeighbor(SplitNode* from, SplitDirection dir, bool forward) {
+    if (!from || !from->IsLeaf()) return nullptr;
+
+    D2D1_RECT_F fromRect = from->rect;
+    SplitNode* bestMatch = nullptr;
+    float bestOverlap = 0.0f;
+
+    ForEachLeaf([&](SplitNode& node) {
+        if (&node == from) return;
+
+        D2D1_RECT_F nodeRect = node.rect;
+        bool isNeighbor = false;
+
+        // Check if this pane is in the correct direction
+        if (dir == SplitDirection::Vertical) {
+            if (forward) {
+                // Right: node should be to the right of from
+                isNeighbor = nodeRect.left >= fromRect.right - 1.0f;
+            } else {
+                // Left: node should be to the left of from
+                isNeighbor = nodeRect.right <= fromRect.left + 1.0f;
+            }
+        } else {
+            if (forward) {
+                // Down: node should be below from
+                isNeighbor = nodeRect.top >= fromRect.bottom - 1.0f;
+            } else {
+                // Up: node should be above from
+                isNeighbor = nodeRect.bottom <= fromRect.top + 1.0f;
+            }
+        }
+
+        if (isNeighbor) {
+            float overlap = CalculateOverlap(fromRect, nodeRect, dir);
+            if (overlap > bestOverlap) {
+                bestOverlap = overlap;
+                bestMatch = &node;
+            }
+        }
+    });
+
+    return bestMatch;
+}
+
+void PaneManager::SwapPaneContent(SplitDirection dir, bool forward) {
+    if (!m_activeNode || !m_activeNode->IsLeaf() || m_zoomed) return;
+
+    SplitNode* neighbor = FindPhysicalNeighbor(m_activeNode, dir, forward);
+    if (!neighbor) return;
+
+    // Swap pane contents (ConPty, Buffer, Parser)
+    std::swap(m_activeNode->pane, neighbor->pane);
+    std::swap(m_activeNode->paneId, neighbor->paneId);
+
+    // Follow the content to neighbor
+    m_activeNode = neighbor;
+}
+
+void PaneManager::MovePane(SplitDirection dir, bool forward) {
+    if (!m_activeNode || !m_activeNode->IsLeaf() || m_zoomed) return;
+
+    SplitNode* neighbor = FindPhysicalNeighbor(m_activeNode, dir, forward);
+    if (!neighbor) return;
+
+    SplitNode* current = m_activeNode;
+    SplitNode* parent = current->parent;
+
+    // Simple case: siblings with matching split direction
+    if (parent && parent->direction == dir) {
+        bool isFirst = (parent->first.get() == current);
+        bool canSwap = (forward && isFirst) || (!forward && !isFirst);
+
+        if (canSwap) {
+            // Simple swap of siblings
+            std::swap(parent->first, parent->second);
+            return;
+        }
+    }
+
+    // Complex case: need to restructure tree
+    // For now, just swap content (same as SwapPaneContent)
+    // Full tree restructuring is complex and needs careful parent pointer management
+    SwapPaneContent(dir, forward);
+
+    // Move focus to neighbor (content was swapped, so we follow the content)
+    m_activeNode = neighbor;
+}

@@ -11,6 +11,12 @@ bool ConPty::Start(int cols, int rows, HWND notifyHwnd, UINT notifyMsg,
     m_notifyMsg = notifyMsg;
     m_notifyLParam = notifyLParam;
 
+    // Save current working directory
+    wchar_t cwd[MAX_PATH];
+    if (GetCurrentDirectoryW(MAX_PATH, cwd) > 0) {
+        m_workingDirectory = cwd;
+    }
+
     HANDLE pipeInRead = INVALID_HANDLE_VALUE;
     HANDLE pipeOutWrite = INVALID_HANDLE_VALUE;
 
