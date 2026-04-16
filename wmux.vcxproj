@@ -71,6 +71,9 @@
       <HighEntropyVA>true</HighEntropyVA>
       <CETCompat>true</CETCompat>
     </Link>
+    <PostBuildEvent>
+      <Command>"C:\Program Files (x86)\Windows Kits\8.1\bin\x64\signtool.exe" sign /sha1 30871695E7D257C26290E9DD1847CA73271205BD /fd SHA256 /t http://timestamp.digicert.com "$(TargetPath)"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -98,6 +101,9 @@
       <HighEntropyVA>true</HighEntropyVA>
       <CETCompat>true</CETCompat>
     </Link>
+    <PostBuildEvent>
+      <Command>"C:\Program Files (x86)\Windows Kits\8.1\bin\x64\signtool.exe" sign /sha1 30871695E7D257C26290E9DD1847CA73271205BD /fd SHA256 /t http://timestamp.digicert.com "$(TargetPath)"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />

@@ -34,7 +34,6 @@
       <UniqueIdentifier>{A1B2C3D4-0002-0001-0001-000000000004}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
-
   <ItemGroup>
     <ClCompile Include="src\main.cpp">
       <Filter>Source Files</Filter>
@@ -60,8 +59,13 @@
     <ClCompile Include="src\pane\pane_tree.cpp">
       <Filter>Source Files\pane</Filter>
     </ClCompile>
+    <ClCompile Include="src\settings.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\settings_dialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
-
   <ItemGroup>
     <ClInclude Include="src\app.h">
       <Filter>Header Files</Filter>
@@ -84,5 +88,14 @@
     <ClInclude Include="src\pane\pane_tree.h">
       <Filter>Header Files\pane</Filter>
     </ClInclude>
+    <ClInclude Include="src\settings.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\settings_dialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="src\wmux.rc" />
   </ItemGroup>
 </Project>
