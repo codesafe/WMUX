@@ -15,7 +15,8 @@ public:
     ConPty& operator=(const ConPty&) = delete;
 
     bool Start(int cols, int rows, HWND notifyHwnd, UINT notifyMsg,
-               const std::wstring& command = L"", LPARAM notifyLParam = 0);
+               const std::wstring& command = L"", LPARAM notifyLParam = 0,
+               const std::wstring& workingDir = L"");
     void Stop();
     void Write(const char* data, size_t len);
     void Resize(int cols, int rows);

@@ -9,7 +9,8 @@ public:
     Pane();
 
     bool Start(int cols, int rows, HWND hwnd, UINT msg,
-               const std::wstring& shell = L"", uint32_t paneId = 0);
+               const std::wstring& shell = L"", uint32_t paneId = 0,
+               const std::wstring& workingDir = L"");
     void Stop();
     void ProcessOutput();
     void SendInput(const char* data, size_t len);

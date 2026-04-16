@@ -6,15 +6,20 @@ ConPty::~ConPty() {
 }
 
 bool ConPty::Start(int cols, int rows, HWND notifyHwnd, UINT notifyMsg,
-                   const std::wstring& command, LPARAM notifyLParam) {
+                   const std::wstring& command, LPARAM notifyLParam,
+                   const std::wstring& workingDir) {
     m_notifyHwnd = notifyHwnd;
     m_notifyMsg = notifyMsg;
     m_notifyLParam = notifyLParam;
 
-    // Save current working directory
-    wchar_t cwd[MAX_PATH];
-    if (GetCurrentDirectoryW(MAX_PATH, cwd) > 0) {
-        m_workingDirectory = cwd;
+    // Use provided working directory or current directory
+    if (!workingDir.empty()) {
+        m_workingDirectory = workingDir;
+    } else {
+        wchar_t cwd[MAX_PATH];
+        if (GetCurrentDirectoryW(MAX_PATH, cwd) > 0) {
+            m_workingDirectory = cwd;
+        }
     }
 
     HANDLE pipeInRead = INVALID_HANDLE_VALUE;
@@ -74,9 +79,13 @@ bool ConPty::Start(int cols, int rows, HWND notifyHwnd, UINT notifyMsg,
     std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
     cmdBuf.push_back(L'\0');
 
+    // Use working directory if specified
+    const wchar_t* lpCurrentDirectory = m_workingDirectory.empty()
+        ? nullptr : m_workingDirectory.c_str();
+
     BOOL success = CreateProcessW(
         nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
-        EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+        EXTENDED_STARTUPINFO_PRESENT, nullptr, lpCurrentDirectory,
         &si.StartupInfo, &m_pi);
 
     DeleteProcThreadAttributeList(attrList);

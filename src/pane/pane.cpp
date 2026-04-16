@@ -10,9 +10,11 @@ Pane::Pane() : m_parser(m_buffer) {
 }
 
 bool Pane::Start(int cols, int rows, HWND hwnd, UINT msg,
-                 const std::wstring& shell, uint32_t paneId) {
+                 const std::wstring& shell, uint32_t paneId,
+                 const std::wstring& workingDir) {
     m_buffer.Init(cols, rows);
-    return m_pty.Start(cols, rows, hwnd, msg, shell, static_cast<LPARAM>(paneId));
+    return m_pty.Start(cols, rows, hwnd, msg, shell, static_cast<LPARAM>(paneId),
+                       workingDir);
 }
 
 void Pane::Stop() {

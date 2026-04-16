@@ -1,12 +1,24 @@
 #include "app.h"
 #include "settings_dialog.h"
+#include "drop_target.h"
 #include <imm.h>
+#include <ole2.h>
 
 #pragma comment(lib, "imm32.lib")
+#pragma comment(lib, "ole32.lib")
 
 #ifndef VK_PROCESSKEY
 #define VK_PROCESSKEY 0xE5
 #endif
+
+App::~App() {
+    if (m_hwnd && m_dropTarget) {
+        RevokeDragDrop(m_hwnd);
+        m_dropTarget->Release();
+        m_dropTarget = nullptr;
+    }
+    OleUninitialize();
+}
 
 bool App::Initialize(HINSTANCE hInstance, int nCmdShow) {
     m_hInstance = hInstance;
@@ -49,6 +61,15 @@ bool App::Initialize(HINSTANCE hInstance, int nCmdShow) {
                                    m_renderer.GetCellWidth(),
                                    m_renderer.GetCellHeight()))
         return false;
+
+    // Initialize OLE for drag-and-drop
+    OleInitialize(nullptr);
+
+    // Register drop target
+    m_dropTarget = new DropTarget([this](const std::wstring& path) {
+        OnDropFolder(path);
+    });
+    RegisterDragDrop(m_hwnd, m_dropTarget);
 
     ShowWindow(m_hwnd, nCmdShow);
     UpdateWindow(m_hwnd);
@@ -261,6 +282,8 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     default:
         return DefWindowProc(m_hwnd, msg, wParam, lParam);
     }
+
+    return DefWindowProc(m_hwnd, msg, wParam, lParam);
 }
 
 void App::OnPaint() {
@@ -688,6 +711,20 @@ void App::OnChar(wchar_t ch) {
         }
         // Ctrl+V (0x16) handled in OnKeyDown
         if (ch == 0x16) return;
+        // Ctrl+C (0x03): handled in OnKeyDown (copy or SIGINT)
+        if (ch == 0x03) {
+            // If there's a selection, OnKeyDown already handled copy
+            // If no selection, send SIGINT without scrolling
+            if (!m_hasSelection) {
+                Pane* active = m_paneManager.GetActivePane();
+                if (active) {
+                    active->SendInput("\x03", 1);
+                }
+            }
+            return;
+        }
+        // Ctrl+A (0x01): handled in OnKeyDown (select all)
+        if (ch == 0x01) return;
         // Backspace: send DEL (0x7F) instead of BS (0x08)
         if (ch == 0x08) {
             Pane* active = m_paneManager.GetActivePane();
@@ -701,7 +738,7 @@ void App::OnChar(wchar_t ch) {
         Pane* active = m_paneManager.GetActivePane();
         if (!active) return;
 
-        // Auto-scroll to bottom on typing
+        // Auto-scroll to bottom on typing (but not for control characters)
         active->GetBuffer().ScrollToBottom();
 
         char utf8[4];
@@ -837,9 +874,10 @@ void App::CloseActivePane() {
 
     RECT rc;
     GetClientRect(m_hwnd, &rc);
-    D2D1_RECT_F clientRect = {0, 0, static_cast<float>(rc.right),
-                               static_cast<float>(rc.bottom)};
-    m_paneManager.Relayout(clientRect, m_renderer.GetCellWidth(),
+    float statusH = m_renderer.GetStatusBarHeight();
+    D2D1_RECT_F paneRect = {0, 0, static_cast<float>(rc.right),
+                             static_cast<float>(rc.bottom) - statusH};
+    m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(),
                            m_renderer.GetCellHeight());
 }
 
@@ -1155,4 +1193,25 @@ void App::UpdateTitleBar() {
         SetWindowTextW(m_hwnd, L"wmux [PREFIX]");
     else
         SetWindowTextW(m_hwnd, L"wmux");
+}
+
+void App::OnDropFolder(const std::wstring& path) {
+    // Check if path is a directory
+    DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+        return;
+
+    // Split current pane vertically with new pane in dropped directory
+    m_paneManager.SplitActive(SplitDirection::Vertical, m_hwnd, WM_PTY_OUTPUT,
+                              m_renderer.GetCellWidth(), m_renderer.GetCellHeight(),
+                              path);
+
+    RECT rc;
+    GetClientRect(m_hwnd, &rc);
+    float statusH = m_renderer.GetStatusBarHeight();
+    D2D1_RECT_F paneRect = {0, 0, static_cast<float>(rc.right),
+                             static_cast<float>(rc.bottom) - statusH};
+    m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(),
+                           m_renderer.GetCellHeight());
+    InvalidateRect(m_hwnd, nullptr, FALSE);
 }

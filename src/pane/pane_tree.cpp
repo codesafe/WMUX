@@ -2,7 +2,8 @@
 #include <algorithm>
 
 bool PaneManager::Initialize(D2D1_RECT_F clientRect, HWND hwnd, UINT ptyMsg,
-                              float cellWidth, float cellHeight) {
+                              float cellWidth, float cellHeight,
+                              const std::wstring& workingDir) {
     m_fullRect = clientRect;
     m_root = std::make_unique<SplitNode>();
     m_root->paneId = m_nextPaneId++;
@@ -16,7 +17,7 @@ bool PaneManager::Initialize(D2D1_RECT_F clientRect, HWND hwnd, UINT ptyMsg,
     int cols = (std::max)(1, static_cast<int>(availW / cellWidth));
     int rows = (std::max)(1, static_cast<int>(availH / cellHeight));
 
-    if (!m_root->pane->Start(cols, rows, hwnd, ptyMsg, L"", m_root->paneId))
+    if (!m_root->pane->Start(cols, rows, hwnd, ptyMsg, L"", m_root->paneId, workingDir))
         return false;
 
     m_activeNode = m_root.get();
@@ -24,7 +25,8 @@ bool PaneManager::Initialize(D2D1_RECT_F clientRect, HWND hwnd, UINT ptyMsg,
 }
 
 bool PaneManager::SplitActive(SplitDirection dir, HWND hwnd, UINT ptyMsg,
-                               float cellWidth, float cellHeight) {
+                               float cellWidth, float cellHeight,
+                               const std::wstring& workingDir) {
     if (!m_activeNode || !m_activeNode->IsLeaf() || m_zoomed)
         return false;
 
@@ -64,7 +66,7 @@ bool PaneManager::SplitActive(SplitDirection dir, HWND hwnd, UINT ptyMsg,
 
     // Start new pane (size will be corrected by Relayout)
     if (!newBranch->second->pane->Start(10, 5, hwnd, ptyMsg, L"",
-                                         newBranch->second->paneId)) {
+                                         newBranch->second->paneId, workingDir)) {
         // Restore old pane
         oldLeaf->pane = std::move(newBranch->first->pane);
         return false;

@@ -34,10 +34,12 @@ public:
     PaneManager() = default;
 
     bool Initialize(D2D1_RECT_F clientRect, HWND hwnd, UINT ptyMsg,
-                    float cellWidth, float cellHeight);
+                    float cellWidth, float cellHeight,
+                    const std::wstring& workingDir = L"");
 
     bool SplitActive(SplitDirection dir, HWND hwnd, UINT ptyMsg,
-                     float cellWidth, float cellHeight);
+                     float cellWidth, float cellHeight,
+                     const std::wstring& workingDir = L"");
     bool CloseActive();
     bool ClosePaneById(uint32_t id);
 

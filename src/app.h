@@ -6,16 +6,21 @@
 #include "pane/pane_tree.h"
 #include "settings.h"
 
+class DropTarget;
+
 enum class InputMode { Normal, Prefix };
 
 class App {
 public:
     bool Initialize(HINSTANCE hInstance, int nCmdShow);
     int Run();
+    ~App();
 
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
+
+    void OnDropFolder(const std::wstring& path);
 
     void OnPaint();
     void OnResize(UINT width, UINT height);
@@ -54,6 +59,8 @@ private:
     InputMode m_inputMode = InputMode::Normal;
     Settings m_settings;
     bool m_skipNextChar = false;  // Flag to skip WM_CHAR after handling in WM_KEYDOWN
+
+    DropTarget* m_dropTarget = nullptr;
 
     // Scrollbar drag state
     bool m_draggingScrollbar = false;
