@@ -72,3 +72,8 @@ prefix 없이 바로 사용할 수 있습니다.
 ## 사용 예
 예를 들어 왼쪽 pane에서는 서버를 실행하고, 오른쪽 pane에서는 로그를 보거나 Git 작업을 할 수 있습니다.  
 여러 프로젝트 폴더를 드롭해서 새 pane을 열고, 필요한 pane만 확대해서 집중하는 방식으로 쓰기 좋습니다.
+
+![image](https://github.com/codesafe/WMUX/blob/main/pic/%EF%BC%91.png)
+
+
+
