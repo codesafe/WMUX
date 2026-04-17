@@ -120,6 +120,10 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             OnResize(LOWORD(lParam), HIWORD(lParam));
         return 0;
 
+    case WM_DPICHANGED:
+        OnDpiChanged(HIWORD(wParam), *reinterpret_cast<RECT*>(lParam));
+        return 0;
+
     case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(m_hwnd, &ps);
@@ -736,14 +740,36 @@ void App::OnPaint() {
     m_renderer.EndFrame();
 }
 
-void App::OnResize(UINT width, UINT height) {
-    m_renderer.Resize(width, height);
+void App::RelayoutPanes() {
+    RECT rc;
+    GetClientRect(m_hwnd, &rc);
+
     float statusH = m_renderer.GetStatusBarHeight();
-    float paneH = static_cast<float>(height) - statusH;
-    if (paneH < 1.0f) paneH = 1.0f;
-    D2D1_RECT_F paneRect = {0, 0, static_cast<float>(width), paneH};
+    float paneH = static_cast<float>(rc.bottom) - statusH;
+    if (paneH < 1.0f)
+        paneH = 1.0f;
+
+    D2D1_RECT_F paneRect = {0, 0, static_cast<float>(rc.right), paneH};
     m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(),
                            m_renderer.GetCellHeight());
+}
+
+void App::OnResize(UINT width, UINT height) {
+    m_renderer.Resize(width, height);
+    RelayoutPanes();
+}
+
+void App::OnDpiChanged(UINT dpi, const RECT& suggestedRect) {
+    SetWindowPos(m_hwnd, nullptr,
+                 suggestedRect.left, suggestedRect.top,
+                 suggestedRect.right - suggestedRect.left,
+                 suggestedRect.bottom - suggestedRect.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+
+    m_renderer.SetDpi(dpi);
+    CancelMouseOperation();
+    RelayoutPanes();
+    InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
 bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
@@ -1321,9 +1347,12 @@ bool App::HitTestScrollbar(float px, float py, Pane*& outPane, D2D1_RECT_F& outR
     int sbSize = outPane->GetBuffer().GetScrollbackSize();
     if (sbSize <= 0) return false;
 
+    float padding = DxRenderer::GetPanePadding();
     float barW = 12.0f;
-    float barX = outRect.right - barW;
-    return px >= barX;
+    float barX = outRect.right - padding - barW;
+    float barRight = outRect.right - padding;
+    return px >= barX && px <= barRight &&
+           py >= outRect.top + padding && py <= outRect.bottom - padding;
 }
 
 bool App::HitTestSeparator(float px, float py, SplitNode*& outNode) {
@@ -1710,6 +1739,20 @@ void App::OnRButtonUp(int x, int y) {
         InvalidateRect(m_hwnd, nullptr, FALSE);
         break;
     }
+}
+
+void App::CancelMouseOperation() {
+    KillTimer(m_hwnd, TIMER_SELECTION_AUTOSCROLL);
+
+    m_draggingHelpScrollbar = false;
+    m_draggingSeparator = false;
+    m_dragSplitNode = nullptr;
+    m_draggingScrollbar = false;
+    m_dragPane = nullptr;
+    m_selecting = false;
+
+    if (GetCapture() == m_hwnd)
+        ReleaseCapture();
 }
 
 void App::ClearSelection() {
