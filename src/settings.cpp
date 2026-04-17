@@ -15,17 +15,6 @@ void Settings::Load() {
     DWORD attr = GetFileAttributesW(path.c_str());
     if (attr == INVALID_FILE_ATTRIBUTES) return;
 
-    // Detect and delete old-format config (no INI sections)
-    {
-        wchar_t probe[8] = {};
-        GetPrivateProfileStringW(L"font", L"name", L"", probe, 8, path.c_str());
-        if (probe[0] == L'\0') {
-            // Section [font] not found - old format file, delete it
-            DeleteFileW(path.c_str());
-            return;
-        }
-    }
-
     wchar_t buf[256] = {};
     GetPrivateProfileStringW(L"font", L"name", L"Consolas",
                              buf, 256, path.c_str());
@@ -55,6 +44,10 @@ void Settings::Load() {
                              colorBuf, 16, path.c_str());
     backgroundColor = static_cast<uint32_t>(wcstoul(colorBuf, nullptr, 16));
 
+    GetPrivateProfileStringW(L"appearance", L"separator_color", L"404040",
+                             colorBuf, 16, path.c_str());
+    separatorColor = static_cast<uint32_t>(wcstoul(colorBuf, nullptr, 16));
+
     prefixTimeoutMs = GetPrivateProfileIntW(L"input", L"prefix_timeout_ms", 1500, path.c_str());
     if (prefixTimeoutMs < 250) prefixTimeoutMs = 250;
     if (prefixTimeoutMs > 10000) prefixTimeoutMs = 10000;
@@ -70,9 +63,6 @@ void Settings::Load() {
 
 void Settings::Save() const {
     std::wstring path = GetConfigPath();
-
-    // Delete old file to avoid format conflicts
-    DeleteFileW(path.c_str());
 
     WritePrivateProfileStringW(L"font", L"name",
                                fontName.c_str(), path.c_str());
@@ -92,6 +82,9 @@ void Settings::Save() const {
 
     swprintf_s(buf, L"%06X", backgroundColor);
     WritePrivateProfileStringW(L"appearance", L"background_color", buf, path.c_str());
+
+    swprintf_s(buf, L"%06X", separatorColor);
+    WritePrivateProfileStringW(L"appearance", L"separator_color", buf, path.c_str());
 
     swprintf_s(buf, L"%d", showPrefixOverlay ? 1 : 0);
     WritePrivateProfileStringW(L"appearance", L"show_prefix_overlay", buf, path.c_str());

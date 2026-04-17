@@ -105,6 +105,20 @@ bool ConPty::Start(int cols, int rows, HWND notifyHwnd, UINT notifyMsg,
 
     HANDLE pipeInRead = INVALID_HANDLE_VALUE;
     HANDLE pipeOutWrite = INVALID_HANDLE_VALUE;
+    auto cleanupStartup = [&]() {
+        if (m_hPC) {
+            ClosePseudoConsole(m_hPC);
+            m_hPC = nullptr;
+        }
+        if (m_pipeWrite != INVALID_HANDLE_VALUE) {
+            CloseHandle(m_pipeWrite);
+            m_pipeWrite = INVALID_HANDLE_VALUE;
+        }
+        if (m_pipeRead != INVALID_HANDLE_VALUE) {
+            CloseHandle(m_pipeRead);
+            m_pipeRead = INVALID_HANDLE_VALUE;
+        }
+    };
 
     if (!CreatePipe(&pipeInRead, &m_pipeWrite, nullptr, 0))
         return false;
@@ -121,26 +135,31 @@ bool ConPty::Start(int cols, int rows, HWND notifyHwnd, UINT notifyMsg,
     CloseHandle(pipeOutWrite);
 
     if (FAILED(hr)) {
-        CloseHandle(m_pipeWrite);
-        CloseHandle(m_pipeRead);
-        m_pipeWrite = INVALID_HANDLE_VALUE;
-        m_pipeRead = INVALID_HANDLE_VALUE;
+        cleanupStartup();
         return false;
     }
 
     SIZE_T attrSize = 0;
-    InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
+    if (!InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize) &&
+        GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+        cleanupStartup();
+        return false;
+    }
     auto attrList = static_cast<PPROC_THREAD_ATTRIBUTE_LIST>(
         HeapAlloc(GetProcessHeap(), 0, attrSize));
     if (!attrList) {
-        ClosePseudoConsole(m_hPC);
-        m_hPC = nullptr;
+        cleanupStartup();
         return false;
     }
 
-    InitializeProcThreadAttributeList(attrList, 1, 0, &attrSize);
-    UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-                              m_hPC, sizeof(m_hPC), nullptr, nullptr);
+    if (!InitializeProcThreadAttributeList(attrList, 1, 0, &attrSize) ||
+        !UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                                   m_hPC, sizeof(m_hPC), nullptr, nullptr)) {
+        DeleteProcThreadAttributeList(attrList);
+        HeapFree(GetProcessHeap(), 0, attrList);
+        cleanupStartup();
+        return false;
+    }
 
     STARTUPINFOEXW si = {};
     si.StartupInfo.cb = sizeof(si);
@@ -173,12 +192,7 @@ bool ConPty::Start(int cols, int rows, HWND notifyHwnd, UINT notifyMsg,
     HeapFree(GetProcessHeap(), 0, attrList);
 
     if (!success) {
-        ClosePseudoConsole(m_hPC);
-        m_hPC = nullptr;
-        CloseHandle(m_pipeWrite);
-        CloseHandle(m_pipeRead);
-        m_pipeWrite = INVALID_HANDLE_VALUE;
-        m_pipeRead = INVALID_HANDLE_VALUE;
+        cleanupStartup();
         return false;
     }
 

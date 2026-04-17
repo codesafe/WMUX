@@ -14,11 +14,12 @@ static const int ID_WIN_W      = 103;
 static const int ID_WIN_H      = 104;
 static const int ID_DIM_INACTIVE = 105;
 static const int ID_BG_COLOR_BTN = 106;
-static const int ID_PREFIX_TIMEOUT = 107;
-static const int ID_SCROLL_LINES = 108;
-static const int ID_SHOW_PREFIX_OVERLAY = 109;
-static const int ID_IDLE_SCRAMBLE = 110;
-static const int ID_CLOSE_BTN = 111;
+static const int ID_SEPARATOR_COLOR_BTN = 107;
+static const int ID_PREFIX_TIMEOUT = 108;
+static const int ID_SCROLL_LINES = 109;
+static const int ID_SHOW_PREFIX_OVERLAY = 110;
+static const int ID_IDLE_SCRAMBLE = 111;
+static const int ID_CLOSE_BTN = 112;
 static const int ID_OK         = IDOK;
 static const int ID_CANCEL     = IDCANCEL;
 
@@ -47,6 +48,7 @@ struct DialogData {
     HWND hWinH;
     HWND hDimInactive;
     HWND hBgColorBtn;
+    HWND hSeparatorColorBtn;
     HWND hPrefixTimeout;
     HWND hScrollLines;
     HWND hIdleScramble;
@@ -55,6 +57,7 @@ struct DialogData {
     HWND hCancel;
     HWND hClose;
     uint32_t bgColor;
+    uint32_t separatorColor;
     HFONT hTitleFont = nullptr;
     HFONT hBodyFont = nullptr;
     HFONT hSmallFont = nullptr;
@@ -200,6 +203,7 @@ static void NotifyPreview(DialogData* data) {
 
     Settings preview = *data->settings;
     preview.backgroundColor = data->bgColor;
+    preview.separatorColor = data->separatorColor;
     preview.dimInactivePanes =
         (SendMessage(data->hDimInactive, BM_GETCHECK, 0, 0) == BST_CHECKED);
     preview.showPrefixOverlay =
@@ -244,32 +248,32 @@ static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         HRGN hRgn = CreateRoundRectRgn(0, 0, rc.right + 1, rc.bottom + 1, 18, 18);
         SetWindowRgn(hwnd, hRgn, TRUE);
 
-        data->hTitleFont = CreateFontW(-22, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        data->hTitleFont = CreateFontW(-19, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                                        DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-        data->hBodyFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        data->hBodyFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                       DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-        data->hSmallFont = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        data->hSmallFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                        DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
 
         RECT clientRc;
         GetClientRect(hwnd, &clientRc);
-        const int contentX = kSidebarWidth + 34;
-        const int topY = 34;
-        const int cardGap = 18;
+        const int contentX = kSidebarWidth + 24;
+        const int topY = 30;
+        const int cardGap = 12;
         const int cardW = 240;
         const int leftCardX = contentX;
         const int rightCardX = contentX + cardW + cardGap;
-        const int cardTop = topY + 14;
+        const int cardTop = topY + 10;
         const int cardInnerLeft = 16;
         const int cardInnerTop = 16;
         const int labelW = 110;
         const int controlW = 92;
         const int comboW = 126;
-        const int rowGap = 40;
+        const int rowGap = 34;
 
         HWND hLabel = CreateSectionLabel(hwnd, L"\uAE00\uAF34", leftCardX + cardInnerLeft, cardTop + cardInnerTop, 140, data->hBodyFont);
 
-        int y = cardTop + 58;
+        int y = cardTop + 50;
         hLabel = CreateLabel(hwnd, L"\uAE00\uAF34", leftCardX + cardInnerLeft, y + 4, labelW, 20);
         SendMessage(hLabel, WM_SETFONT, (WPARAM)data->hBodyFont, TRUE);
         data->hFontCombo = CreateWindowExW(0, L"COMBOBOX", nullptr,
@@ -297,7 +301,7 @@ static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         const int rightTop = cardTop;
         hLabel = CreateSectionLabel(hwnd, L"\uCC3D", rightCardX + cardInnerLeft, rightTop + cardInnerTop, 140, data->hBodyFont);
 
-        y = rightTop + 58;
+        y = rightTop + 50;
         hLabel = CreateLabel(hwnd, L"\uB108\uBE44", rightCardX + cardInnerLeft, y + 4, labelW, 20);
         SendMessage(hLabel, WM_SETFONT, (WPARAM)data->hBodyFont, TRUE);
         swprintf_s(buf, L"%d", data->settings->windowWidth);
@@ -311,10 +315,10 @@ static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         data->hWinH = CreateEdit(hwnd, buf, ID_WIN_H, rightCardX + 98, y, controlW, 24);
         SendMessage(data->hWinH, WM_SETFONT, (WPARAM)data->hBodyFont, TRUE);
 
-        const int secondRowTop = 230;
+        const int secondRowTop = 214;
         hLabel = CreateSectionLabel(hwnd, L"\uD654\uBA74", leftCardX + cardInnerLeft, secondRowTop + cardInnerTop, 140, data->hBodyFont);
 
-        y = secondRowTop + 58;
+        y = secondRowTop + 50;
         data->hDimInactive = CreateWindowExW(0, L"BUTTON", L"\uBE44\uD65C\uC131 pane \uC5B4\uB465\uAC8C",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
             leftCardX + cardInnerLeft, y, 170, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_DIM_INACTIVE)),
@@ -333,7 +337,17 @@ static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         data->bgColor = data->settings->backgroundColor;
         SendMessage(data->hBgColorBtn, WM_SETFONT, (WPARAM)data->hBodyFont, TRUE);
 
-        y += 58;
+        y += 50;
+        hLabel = CreateLabel(hwnd, L"\uBD84\uD560\uC120 \uC0C9", leftCardX + cardInnerLeft, y + 4, labelW, 20);
+        SendMessage(hLabel, WM_SETFONT, (WPARAM)data->hBodyFont, TRUE);
+        data->hSeparatorColorBtn = CreateWindowExW(0, L"BUTTON", L"",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
+            leftCardX + 98, y - 2, 96, 30, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SEPARATOR_COLOR_BTN)),
+            GetModuleHandle(nullptr), nullptr);
+        data->separatorColor = data->settings->separatorColor;
+        SendMessage(data->hSeparatorColorBtn, WM_SETFONT, (WPARAM)data->hBodyFont, TRUE);
+
+        y += 50;
         data->hShowPrefixOverlay = CreateWindowExW(0, L"BUTTON", L"\uD504\uB9AC\uD53D\uC2A4 \uC624\uBC84\uB808\uC774 \uD45C\uC2DC",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
             leftCardX + cardInnerLeft, y, 180, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_SHOW_PREFIX_OVERLAY)),
@@ -344,14 +358,14 @@ static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 
         hLabel = CreateSectionLabel(hwnd, L"\uB3D9\uC791", rightCardX + cardInnerLeft, secondRowTop + cardInnerTop, 140, data->hBodyFont);
 
-        y = secondRowTop + 58;
+        y = secondRowTop + 50;
         hLabel = CreateLabel(hwnd, L"\uD504\uB9AC\uD53D\uC2A4 \uC2DC\uAC04", rightCardX + cardInnerLeft, y + 4, 110, 20);
         SendMessage(hLabel, WM_SETFONT, (WPARAM)data->hBodyFont, TRUE);
         swprintf_s(buf, L"%d", data->settings->prefixTimeoutMs);
         data->hPrefixTimeout = CreateEdit(hwnd, buf, ID_PREFIX_TIMEOUT, rightCardX + 108, y, controlW, 24);
         SendMessage(data->hPrefixTimeout, WM_SETFONT, (WPARAM)data->hBodyFont, TRUE);
 
-        y += 58;
+        y += 50;
         hLabel = CreateLabel(hwnd, L"\uC2A4\uD06C\uB864 \uC904 \uC218", rightCardX + cardInnerLeft, y + 4, 110, 20);
         SendMessage(hLabel, WM_SETFONT, (WPARAM)data->hBodyFont, TRUE);
         swprintf_s(buf, L"%d", data->settings->scrollLines);
@@ -364,7 +378,7 @@ static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             SendMessage(hHint, WM_SETFONT, (WPARAM)data->hSmallFont, TRUE);
         }
 
-        y += 58;
+        y += 50;
         hLabel = CreateLabel(hwnd, L"\uC720\uD734 \uD6A8\uACFC(\uBD84)", rightCardX + cardInnerLeft, y + 4, 110, 20);
         SendMessage(hLabel, WM_SETFONT, (WPARAM)data->hBodyFont, TRUE);
         swprintf_s(buf, L"%d", data->settings->idleScrambleMinutes);
@@ -403,11 +417,12 @@ static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         HDC hdc = dis->hDC;
         SetBkMode(hdc, TRANSPARENT);
 
-        if (dis->CtlID == ID_BG_COLOR_BTN) {
+        if (dis->CtlID == ID_BG_COLOR_BTN || dis->CtlID == ID_SEPARATOR_COLOR_BTN) {
+            uint32_t color = (dis->CtlID == ID_BG_COLOR_BTN) ? data->bgColor : data->separatorColor;
             HBRUSH hBrush = CreateSolidBrush(RGB(
-                (data->bgColor >> 16) & 0xFF,
-                (data->bgColor >> 8) & 0xFF,
-                data->bgColor & 0xFF));
+                (color >> 16) & 0xFF,
+                (color >> 8) & 0xFF,
+                color & 0xFF));
             FillRect(hdc, &rc, hBrush);
             DeleteObject(hBrush);
             FrameRect(hdc, &rc, GetSolidBrush(kBorder));
@@ -503,10 +518,10 @@ static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             FrameRect(hdc, &card, GetSolidBrush(kBorder));
         };
 
-        RECT card1 = {kSidebarWidth + 24, 48, kSidebarWidth + 264, 198};
-        RECT card2 = {kSidebarWidth + 282, 48, kSidebarWidth + 522, 198};
-        RECT card3 = {kSidebarWidth + 24, 220, kSidebarWidth + 264, 452};
-        RECT card4 = {kSidebarWidth + 282, 220, kSidebarWidth + 522, 452};
+        RECT card1 = {kSidebarWidth + 14, 42, kSidebarWidth + 254, 182};
+        RECT card2 = {kSidebarWidth + 266, 42, kSidebarWidth + 506, 182};
+        RECT card3 = {kSidebarWidth + 14, 206, kSidebarWidth + 254, 476};
+        RECT card4 = {kSidebarWidth + 266, 206, kSidebarWidth + 506, 438};
         drawCard(card1);
         drawCard(card2);
         drawCard(card3);
@@ -568,7 +583,8 @@ static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         // Only handle button clicks (BN_CLICKED), ignore other notifications
         if (HIWORD(wParam) != BN_CLICKED && HIWORD(wParam) != 0) break;
         switch (LOWORD(wParam)) {
-        case ID_BG_COLOR_BTN: {
+        case ID_BG_COLOR_BTN:
+        case ID_SEPARATOR_COLOR_BTN: {
             if (HIWORD(wParam) != BN_CLICKED) break;
 
             // Show color picker dialog
@@ -577,17 +593,26 @@ static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             cc.lStructSize = sizeof(cc);
             cc.hwndOwner = hwnd;
             cc.lpCustColors = customColors;
+            uint32_t currentColor = (LOWORD(wParam) == ID_BG_COLOR_BTN)
+                ? data->bgColor : data->separatorColor;
             cc.rgbResult = RGB(
-                (data->bgColor >> 16) & 0xFF,
-                (data->bgColor >> 8) & 0xFF,
-                data->bgColor & 0xFF);
+                (currentColor >> 16) & 0xFF,
+                (currentColor >> 8) & 0xFF,
+                currentColor & 0xFF);
             cc.Flags = CC_FULLOPEN | CC_RGBINIT;
 
             if (ChooseColor(&cc)) {
-                data->bgColor = ((GetRValue(cc.rgbResult) << 16) |
-                                 (GetGValue(cc.rgbResult) << 8) |
-                                 GetBValue(cc.rgbResult));
-                InvalidateRect(data->hBgColorBtn, nullptr, TRUE);
+                uint32_t chosenColor = ((GetRValue(cc.rgbResult) << 16) |
+                                        (GetGValue(cc.rgbResult) << 8) |
+                                        GetBValue(cc.rgbResult));
+                HWND targetButton = data->hBgColorBtn;
+                if (LOWORD(wParam) == ID_BG_COLOR_BTN) {
+                    data->bgColor = chosenColor;
+                } else {
+                    data->separatorColor = chosenColor;
+                    targetButton = data->hSeparatorColorBtn;
+                }
+                InvalidateRect(targetButton, nullptr, TRUE);
                 NotifyPreview(data);
             }
             return 0;
@@ -666,6 +691,7 @@ static LRESULT CALLBACK DlgWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 (SendMessage(data->hShowPrefixOverlay, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
             data->settings->backgroundColor = data->bgColor;
+            data->settings->separatorColor = data->separatorColor;
 
             data->closing = true;
             data->settings->Save();

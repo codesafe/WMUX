@@ -83,6 +83,7 @@ private:
     // Skip next WM_CHAR if key was already handled in WM_KEYDOWN
     // Auto-reset by TIMER_RESET_SKIP_FLAG if WM_CHAR is not delivered
     bool m_skipNextChar = false;
+    bool m_oleInitialized = false;
 
     DropTarget* m_dropTarget = nullptr;
 

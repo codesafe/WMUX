@@ -1,4 +1,4 @@
-#include "terminal/parser.h"
+﻿#include "terminal/parser.h"
 #include "terminal/buffer.h"
 
 VtParser::VtParser(TerminalBuffer& buffer) : m_buffer(buffer) {}
@@ -9,6 +9,17 @@ void VtParser::ProcessBytes(const char* data, size_t len) {
 }
 
 void VtParser::ProcessByte(uint8_t byte) {
+    if (m_state == ParserState::StringPassthrough) {
+        if (byte == 0x1B)
+            m_state = ParserState::StringPassthroughEsc;
+        return;
+    }
+
+    if (m_state == ParserState::StringPassthroughEsc) {
+        m_state = (byte == '\\') ? ParserState::Ground : ParserState::StringPassthrough;
+        return;
+    }
+
     // ESC always resets to Escape state
     if (byte == 0x1B && m_state != ParserState::OscString) {
         m_state = ParserState::Escape;
@@ -55,6 +66,7 @@ void VtParser::ProcessByte(uint8_t byte) {
         HandleOsc(byte);
         break;
     case ParserState::StringPassthrough:
+    case ParserState::StringPassthroughEsc:
         // DCS/APC/PM: ignore all bytes until ST (ESC \)
         // ESC is caught above and resets state; ST's \ then goes to HandleEscape default→Ground
         break;

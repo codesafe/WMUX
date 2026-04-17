@@ -19,6 +19,7 @@ public:
     bool SetDpi(UINT dpi);
     bool UpdateFont(const std::wstring& fontName, float fontSize);
     void SetBackgroundColor(uint32_t rgb);
+    void SetSeparatorColor(uint32_t rgb);
     void Resize(UINT width, UINT height);
     void Render(const TerminalBuffer& buffer);
 
@@ -59,11 +60,11 @@ public:
 
     // Help popup constants
     static constexpr float HELP_POPUP_WIDTH = 700.0f;
-    static constexpr int HELP_TOTAL_LINES = 47;
     static constexpr int HELP_VISIBLE_LINES = 20;
     static constexpr float HELP_POPUP_PADDING = 20.0f;
     static constexpr float HELP_SCROLLBAR_WIDTH = 8.0f;
     static constexpr float HELP_DRAG_SENSITIVITY = 8.0f;  // pixels per line
+    static int GetHelpLineCount();
 
 private:
     bool CreateDeviceResources();
@@ -94,6 +95,7 @@ private:
 
     D2D1_COLOR_F m_defaultFg = {0.80f, 0.80f, 0.80f, 1.0f};
     D2D1_COLOR_F m_defaultBg = {0.12f, 0.12f, 0.12f, 1.0f};
+    D2D1_COLOR_F m_separatorColor = {0.25f, 0.25f, 0.25f, 1.0f};
 
     std::array<D2D1_COLOR_F, 256> m_palette;
 };

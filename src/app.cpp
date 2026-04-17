@@ -1,4 +1,4 @@
-#include "app.h"
+﻿#include "app.h"
 #include "settings_dialog.h"
 #include "drop_target.h"
 #include <imm.h>
@@ -20,7 +20,10 @@ App::~App() {
         m_dropTarget->Release();
         m_dropTarget = nullptr;
     }
-    OleUninitialize();
+    if (m_oleInitialized) {
+        OleUninitialize();
+        m_oleInitialized = false;
+    }
 }
 
 bool App::Initialize(HINSTANCE hInstance, int nCmdShow) {
@@ -54,6 +57,7 @@ bool App::Initialize(HINSTANCE hInstance, int nCmdShow) {
     if (!m_renderer.Initialize(m_hwnd, m_settings.fontName, m_settings.fontSize,
                                 m_settings.backgroundColor))
         return false;
+    m_renderer.SetSeparatorColor(m_settings.separatorColor);
 
     RECT rc;
     GetClientRect(m_hwnd, &rc);
@@ -67,7 +71,10 @@ bool App::Initialize(HINSTANCE hInstance, int nCmdShow) {
         return false;
 
     // Initialize OLE for drag-and-drop
-    OleInitialize(nullptr);
+    HRESULT oleResult = OleInitialize(nullptr);
+    if (FAILED(oleResult))
+        return false;
+    m_oleInitialized = true;
 
     // Register drop target
     m_dropTarget = new DropTarget([this](const std::wstring& path) {
@@ -418,9 +425,11 @@ void App::SelectLineAt(Pane* pane, int row) {
 void App::ApplyVisualSettings(const Settings& settings) {
     m_renderer.UpdateFont(settings.fontName, settings.fontSize);
     m_renderer.SetBackgroundColor(settings.backgroundColor);
+    m_renderer.SetSeparatorColor(settings.separatorColor);
     m_settings.fontName = settings.fontName;
     m_settings.fontSize = settings.fontSize;
     m_settings.backgroundColor = settings.backgroundColor;
+    m_settings.separatorColor = settings.separatorColor;
     m_settings.dimInactivePanes = settings.dimInactivePanes;
     m_settings.showPrefixOverlay = settings.showPrefixOverlay;
     m_settings.idleScrambleMinutes = settings.idleScrambleMinutes;
@@ -1235,7 +1244,7 @@ void App::OnPtyOutput(WPARAM wParam, LPARAM lParam) {
         // Process exited - close this pane
         if (!m_paneManager.ClosePaneById(paneId)) {
             // Last pane closed
-            DestroyWindow(m_hwnd);
+            PostMessage(m_hwnd, WM_CLOSE, 0, 0);
             return;
         }
         RECT rc;
@@ -1265,7 +1274,7 @@ void App::OnMouseWheel(WPARAM wParam, LPARAM lParam) {
         int steps = delta / WHEEL_DELTA;
         m_helpScrollOffset -= steps * 3;
 
-        const int maxScroll = DxRenderer::HELP_TOTAL_LINES - DxRenderer::HELP_VISIBLE_LINES;
+        const int maxScroll = (std::max)(0, DxRenderer::GetHelpLineCount() - DxRenderer::HELP_VISIBLE_LINES);
         if (m_helpScrollOffset < 0) m_helpScrollOffset = 0;
         if (m_helpScrollOffset > maxScroll) m_helpScrollOffset = maxScroll;
 
@@ -1635,7 +1644,7 @@ void App::OnMouseMove(int x, int y) {
         }
         InvalidateRect(m_hwnd, nullptr, FALSE);
     } else if (m_draggingHelpScrollbar) {
-        const int maxScroll = DxRenderer::HELP_TOTAL_LINES - DxRenderer::HELP_VISIBLE_LINES;
+        const int maxScroll = (std::max)(0, DxRenderer::GetHelpLineCount() - DxRenderer::HELP_VISIBLE_LINES);
         float deltaY = static_cast<float>(y) - m_helpDragStartY;
         int scrollDelta = static_cast<int>(deltaY / DxRenderer::HELP_DRAG_SENSITIVITY);
 

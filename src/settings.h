@@ -10,6 +10,7 @@ struct Settings {
     int windowHeight = 800;
     bool dimInactivePanes = true;  // Dim inactive panes by default
     uint32_t backgroundColor = 0x1E1E1E;  // RGB background color (default: dark gray)
+    uint32_t separatorColor = 0x404040;  // RGB separator color
     int prefixTimeoutMs = 1500;
     int scrollLines = 0;  // 0 = use system setting
     int idleScrambleMinutes = 5;  // 0 = disabled

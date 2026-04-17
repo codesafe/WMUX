@@ -284,6 +284,10 @@ void TerminalBuffer::EraseDisplay(int mode) {
     case 3: // Erase all + scrollback
         for (int r = 0; r < m_rows; r++)
             ClearLine(r);
+        if (mode == 3) {
+            m_scrollback.clear();
+            m_scrollOffset = 0;
+        }
         break;
     }
 }

@@ -12,6 +12,7 @@ enum class ParserState {
     Csi,
     OscString,
     StringPassthrough,  // DCS, APC, PM - ignore until ST (ESC \)
+    StringPassthroughEsc,
 };
 
 class VtParser {
