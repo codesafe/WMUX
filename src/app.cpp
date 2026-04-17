@@ -14,6 +14,16 @@
 
 static bool IsWordChar(wchar_t ch);
 
+UINT App::GetAddPaneMessage() {
+    static UINT msg = RegisterWindowMessageW(L"WMUX_ADD_PANE_MESSAGE");
+    return msg;
+}
+
+ULONG_PTR App::GetAddPaneCopyDataId() {
+    static constexpr ULONG_PTR kAddPaneCopyDataId = 0x574D5558; // 'WMUX'
+    return kAddPaneCopyDataId;
+}
+
 App::~App() {
     if (m_hwnd && m_dropTarget) {
         RevokeDragDrop(m_hwnd);
@@ -121,7 +131,30 @@ LRESULT CALLBACK App::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 }
 
 LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == GetAddPaneMessage()) {
+        AddPaneFromExternalRequest();
+        return 0;
+    }
+
     switch (msg) {
+    case WM_COPYDATA: {
+        auto* copyData = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
+        if (!copyData || copyData->dwData != GetAddPaneCopyDataId())
+            break;
+
+        std::wstring workingDir;
+        if (copyData->lpData && copyData->cbData >= sizeof(wchar_t)) {
+            size_t charCount = copyData->cbData / sizeof(wchar_t);
+            const auto* text = static_cast<const wchar_t*>(copyData->lpData);
+            if (text[charCount - 1] == L'\0')
+                charCount--;
+            workingDir.assign(text, charCount);
+        }
+
+        AddPaneFromExternalRequest(workingDir);
+        return TRUE;
+    }
+
     case WM_SIZE:
         if (wParam != SIZE_MINIMIZED)
             OnResize(LOWORD(lParam), HIWORD(lParam));
@@ -1327,6 +1360,23 @@ void App::SplitActivePane(SplitDirection dir) {
     m_paneManager.SplitActive(dir, m_hwnd, WM_PTY_OUTPUT,
                                m_renderer.GetCellWidth(),
                                m_renderer.GetCellHeight());
+}
+
+void App::AddPaneFromExternalRequest(const std::wstring& workingDir) {
+    if (m_paneManager.IsZoomed()) {
+        m_paneManager.ToggleZoom();
+        RelayoutPanes();
+    }
+
+    if (m_paneManager.SplitActive(SplitDirection::Vertical, m_hwnd, WM_PTY_OUTPUT,
+                                  m_renderer.GetCellWidth(),
+                                  m_renderer.GetCellHeight(),
+                                  workingDir)) {
+        RelayoutPanes();
+        ShowWindow(m_hwnd, SW_RESTORE);
+        SetForegroundWindow(m_hwnd);
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+    }
 }
 
 void App::CloseActivePane() {

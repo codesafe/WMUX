@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <memory>
 #include <map>
+#include <string>
 #include "renderer/dx_renderer.h"
 #include "pane/pane_tree.h"
 #include "settings.h"
@@ -17,6 +18,8 @@ public:
     bool Initialize(HINSTANCE hInstance, int nCmdShow);
     int Run();
     ~App();
+    static UINT GetAddPaneMessage();
+    static ULONG_PTR GetAddPaneCopyDataId();
 
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -36,6 +39,7 @@ private:
     void OnRButtonUp(int x, int y);
     void OnPtyOutput(WPARAM wParam, LPARAM lParam);
     void OnDpiChanged(UINT dpi, const RECT& suggestedRect);
+    void AddPaneFromExternalRequest(const std::wstring& workingDir = L"");
 
     void SplitActivePane(SplitDirection dir);
     void CloseActivePane();
