@@ -45,6 +45,7 @@ public:
     void RenderPrefixIndicator();
     void RenderPrefixOverlay(const std::wstring& text);
     void RenderHelpPopup(int scrollOffset);
+    void RenderDropZone(D2D1_RECT_F rect, int zone);
     void EndFrame();
 
     float GetStatusBarHeight() const { return m_cellHeight + 4.0f; }

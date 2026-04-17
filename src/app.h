@@ -122,6 +122,13 @@ private:
     float m_helpDragStartY = 0;
     int m_helpScrollOffsetAtDragStart = 0;
 
+    // Pane drag state
+    bool m_draggingPane = false;
+    Pane* m_draggedPane = nullptr;
+    SplitNode* m_draggedNode = nullptr;
+    Pane* m_dropTargetPane = nullptr;
+    int m_dropZone = -1;  // 0=top, 1=right, 2=bottom, 3=left, 4=center(swap)
+
     static constexpr UINT WM_PTY_OUTPUT = WM_APP + 1;
     static constexpr UINT TIMER_CLOCK = 1;
     static constexpr UINT TIMER_PREFIX = 2;

@@ -239,7 +239,7 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         int mx = static_cast<int>(static_cast<short>(LOWORD(lParam)));
         int my = static_cast<int>(static_cast<short>(HIWORD(lParam)));
 
-        if (m_draggingHelpScrollbar || m_draggingSeparator || m_draggingScrollbar || m_selecting) {
+        if (m_draggingPane || m_draggingHelpScrollbar || m_draggingSeparator || m_draggingScrollbar || m_selecting) {
             OnMouseMove(mx, my);
         } else {
             // Update cursor when hovering over help popup or separator or scrollbar
@@ -280,7 +280,7 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_LBUTTONUP:
         RegisterUserActivity();
-        if (m_draggingHelpScrollbar || m_draggingSeparator || m_draggingScrollbar || m_selecting)
+        if (m_draggingPane || m_draggingHelpScrollbar || m_draggingSeparator || m_draggingScrollbar || m_selecting)
             OnLButtonUp();
         return 0;
 
@@ -716,6 +716,16 @@ void App::OnPaint() {
     if (m_inputMode == InputMode::Prefix && m_settings.showPrefixOverlay) {
         m_renderer.RenderPrefixIndicator();
         m_renderer.RenderPrefixOverlay(L"V vertical  H horizontal  X close  Z zoom  O settings  Esc cancel");
+    }
+
+    // Render drop zone preview when dragging pane
+    if (m_draggingPane && m_dropTargetPane && m_dropZone >= 0) {
+        D2D1_RECT_F targetRect = {};
+        m_paneManager.ForEachLeaf([&](SplitNode& node) {
+            if (node.pane.get() == m_dropTargetPane)
+                targetRect = node.rect;
+        });
+        m_renderer.RenderDropZone(targetRect, m_dropZone);
     }
 
     // Render help popup if showing
@@ -1525,23 +1535,39 @@ void App::OnLButtonDown(int x, int y) {
         return;
     }
 
-    // Pane activation and text selection
+    // Check if Shift is pressed for pane dragging
+    bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
+    // Pane activation and text selection (or pane drag if Shift pressed)
     ClearSelection();
     if (m_paneManager.FindPaneAndRectAtPoint(
             static_cast<float>(x), static_cast<float>(y), pane, rect)) {
         // Activate clicked pane
         m_paneManager.SetActivePane(pane);
 
-        // Start text selection
-        m_selecting = true;
-        m_selectPane = pane;
-        m_selectPaneRect = rect;
-        int viewRow = 0;
-        MouseToCell(x, y, pane, rect, viewRow, m_selStartCol);
-        m_selStartRow = pane->GetBuffer().ViewRowToDocumentRow(viewRow);
-        m_selEndRow = m_selStartRow;
-        m_selEndCol = m_selStartCol;
-        SetCapture(m_hwnd);
+        if (shift && !m_paneManager.HasSinglePane()) {
+            // Start pane drag
+            m_draggingPane = true;
+            m_draggedPane = pane;
+            m_draggedNode = nullptr;
+            m_paneManager.ForEachLeaf([&](SplitNode& node) {
+                if (node.pane.get() == pane)
+                    m_draggedNode = &node;
+            });
+            SetCapture(m_hwnd);
+            SetCursor(LoadCursor(nullptr, IDC_SIZEALL));
+        } else {
+            // Start text selection
+            m_selecting = true;
+            m_selectPane = pane;
+            m_selectPaneRect = rect;
+            int viewRow = 0;
+            MouseToCell(x, y, pane, rect, viewRow, m_selStartCol);
+            m_selStartRow = pane->GetBuffer().ViewRowToDocumentRow(viewRow);
+            m_selEndRow = m_selStartRow;
+            m_selEndCol = m_selStartCol;
+            SetCapture(m_hwnd);
+        }
         InvalidateRect(m_hwnd, nullptr, FALSE);
     }
 }
@@ -1549,7 +1575,37 @@ void App::OnLButtonDown(int x, int y) {
 void App::OnMouseMove(int x, int y) {
     m_lastMouseX = x;
     m_lastMouseY = y;
-    if (m_draggingHelpScrollbar) {
+    if (m_draggingPane) {
+        // Find target pane under mouse
+        Pane* targetPane = m_paneManager.FindPaneAtPoint(static_cast<float>(x), static_cast<float>(y));
+
+        if (targetPane && targetPane != m_draggedPane) {
+            m_dropTargetPane = targetPane;
+
+            // Find target rect
+            D2D1_RECT_F targetRect = {};
+            m_paneManager.ForEachLeaf([&](SplitNode& node) {
+                if (node.pane.get() == targetPane)
+                    targetRect = node.rect;
+            });
+
+            // Calculate drop zone (0=top, 1=right, 2=bottom, 3=left, 4=center)
+            float relX = (x - targetRect.left) / (targetRect.right - targetRect.left);
+            float relY = (y - targetRect.top) / (targetRect.bottom - targetRect.top);
+
+            // Determine which zone (edges have priority)
+            const float edgeSize = 0.25f;
+            if (relY < edgeSize) m_dropZone = 0;  // Top
+            else if (relY > 1.0f - edgeSize) m_dropZone = 2;  // Bottom
+            else if (relX < edgeSize) m_dropZone = 3;  // Left
+            else if (relX > 1.0f - edgeSize) m_dropZone = 1;  // Right
+            else m_dropZone = 4;  // Center (swap)
+        } else {
+            m_dropTargetPane = nullptr;
+            m_dropZone = -1;
+        }
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+    } else if (m_draggingHelpScrollbar) {
         const int maxScroll = DxRenderer::HELP_TOTAL_LINES - DxRenderer::HELP_VISIBLE_LINES;
         float deltaY = static_cast<float>(y) - m_helpDragStartY;
         int scrollDelta = static_cast<int>(deltaY / DxRenderer::HELP_DRAG_SENSITIVITY);
@@ -1575,7 +1631,28 @@ void App::OnMouseMove(int x, int y) {
 }
 
 void App::OnLButtonUp() {
-    if (m_draggingHelpScrollbar) {
+    if (m_draggingPane) {
+        if (m_dropTargetPane && m_dropZone >= 0) {
+            // Perform the pane move/insert
+            m_paneManager.InsertPaneAt(m_draggedPane, m_dropTargetPane, m_dropZone);
+
+            // Relayout
+            RECT rc;
+            GetClientRect(m_hwnd, &rc);
+            float statusH = m_renderer.GetStatusBarHeight();
+            float paneH = static_cast<float>(rc.bottom) - statusH;
+            D2D1_RECT_F paneRect = {0, 0, static_cast<float>(rc.right), paneH};
+            m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(), m_renderer.GetCellHeight());
+        }
+
+        m_draggingPane = false;
+        m_draggedPane = nullptr;
+        m_draggedNode = nullptr;
+        m_dropTargetPane = nullptr;
+        m_dropZone = -1;
+        ReleaseCapture();
+        SetCursor(LoadCursor(nullptr, IDC_IBEAM));
+    } else if (m_draggingHelpScrollbar) {
         m_draggingHelpScrollbar = false;
         ReleaseCapture();
     } else if (m_draggingSeparator) {

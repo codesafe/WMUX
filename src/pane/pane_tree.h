@@ -52,6 +52,9 @@ public:
     void MovePane(SplitDirection dir, bool forward);
     // Alt+Shift+Arrow: Swap pane content with neighbor
     void SwapPaneContent(SplitDirection dir, bool forward);
+    // Drag & Drop: Insert source pane relative to target
+    // zone: 0=top, 1=right, 2=bottom, 3=left, 4=center(swap)
+    void InsertPaneAt(Pane* source, Pane* target, int zone);
 
     void Relayout(D2D1_RECT_F clientRect, float cellWidth, float cellHeight);
 

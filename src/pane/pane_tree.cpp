@@ -510,3 +510,109 @@ void PaneManager::MovePane(SplitDirection dir, bool forward) {
     // Move focus to neighbor (content was swapped, so we follow the content)
     m_activeNode = neighbor;
 }
+
+void PaneManager::InsertPaneAt(Pane* source, Pane* target, int zone) {
+    if (!source || !target || source == target) return;
+
+    // Find nodes
+    SplitNode* sourceNode = nullptr;
+    SplitNode* targetNode = nullptr;
+
+    ForEachLeaf([&](SplitNode& node) {
+        if (node.pane.get() == source) sourceNode = &node;
+        if (node.pane.get() == target) targetNode = &node;
+    });
+
+    if (!sourceNode || !targetNode) return;
+
+    // Zone 4: Center (swap)
+    if (zone == 4) {
+        std::swap(sourceNode->pane, targetNode->pane);
+        std::swap(sourceNode->paneId, targetNode->paneId);
+        m_activeNode = targetNode;
+        return;
+    }
+
+    // Extract source pane from tree
+    SplitNode* sourceParent = sourceNode->parent;
+    std::unique_ptr<Pane> extractedPane = std::move(sourceNode->pane);
+    uint32_t extractedId = sourceNode->paneId;
+
+    if (!sourceParent) {
+        // Source is root - can't extract
+        sourceNode->pane = std::move(extractedPane);
+        return;
+    }
+
+    // Collapse source parent (promote sibling)
+    bool sourceWasFirst = (sourceParent->first.get() == sourceNode);
+    std::unique_ptr<SplitNode> sibling = std::move(sourceWasFirst ? sourceParent->second : sourceParent->first);
+
+    SplitNode* grandParent = sourceParent->parent;
+    if (!grandParent) {
+        // Parent was root
+        sibling->parent = nullptr;
+        m_root = std::move(sibling);
+    } else {
+        // Replace parent with sibling
+        bool parentWasFirst = (grandParent->first.get() == sourceParent);
+        if (parentWasFirst) {
+            grandParent->first = std::move(sibling);
+            grandParent->first->parent = grandParent;
+        } else {
+            grandParent->second = std::move(sibling);
+            grandParent->second->parent = grandParent;
+        }
+    }
+
+    // Create new node for extracted pane
+    auto newSourceNode = std::make_unique<SplitNode>();
+    newSourceNode->pane = std::move(extractedPane);
+    newSourceNode->paneId = extractedId;
+
+    // Insert at target
+    SplitDirection splitDir = (zone == 0 || zone == 2) ? SplitDirection::Horizontal : SplitDirection::Vertical;
+    bool sourceFirst = (zone == 0 || zone == 3);  // top or left
+
+    auto newBranch = std::make_unique<SplitNode>();
+    newBranch->direction = splitDir;
+    newBranch->splitRatio = 0.5f;
+
+    // Move target pane to new branch
+    auto targetCopy = std::make_unique<SplitNode>();
+    targetCopy->pane = std::move(targetNode->pane);
+    targetCopy->paneId = targetNode->paneId;
+
+    if (sourceFirst) {
+        newBranch->first = std::move(newSourceNode);
+        newBranch->second = std::move(targetCopy);
+    } else {
+        newBranch->first = std::move(targetCopy);
+        newBranch->second = std::move(newSourceNode);
+    }
+
+    newBranch->first->parent = newBranch.get();
+    newBranch->second->parent = newBranch.get();
+
+    // Replace target in tree
+    SplitNode* targetParent = targetNode->parent;
+    SplitNode* newBranchPtr = newBranch.get();
+
+    if (!targetParent) {
+        // Target is root
+        newBranch->parent = nullptr;
+        m_root = std::move(newBranch);
+    } else {
+        bool targetWasFirst = (targetParent->first.get() == targetNode);
+        newBranch->parent = targetParent;
+
+        if (targetWasFirst) {
+            targetParent->first = std::move(newBranch);
+        } else {
+            targetParent->second = std::move(newBranch);
+        }
+    }
+
+    // Set active to the moved source pane
+    m_activeNode = sourceFirst ? newBranchPtr->first.get() : newBranchPtr->second.get();
+}

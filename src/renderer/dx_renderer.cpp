@@ -929,6 +929,34 @@ void DxRenderer::RenderHelpPopup(int scrollOffset) {
     }
 }
 
+void DxRenderer::RenderDropZone(D2D1_RECT_F rect, int zone) {
+    // zone: 0=top, 1=right, 2=bottom, 3=left, 4=center
+    D2D1_RECT_F highlightRect = rect;
+
+    if (zone == 0) {
+        // Top half
+        highlightRect.bottom = rect.top + (rect.bottom - rect.top) * 0.5f;
+    } else if (zone == 1) {
+        // Right half
+        highlightRect.left = rect.left + (rect.right - rect.left) * 0.5f;
+    } else if (zone == 2) {
+        // Bottom half
+        highlightRect.top = rect.top + (rect.bottom - rect.top) * 0.5f;
+    } else if (zone == 3) {
+        // Left half
+        highlightRect.right = rect.left + (rect.right - rect.left) * 0.5f;
+    }
+    // zone 4 (center) uses full rect
+
+    // Semi-transparent green overlay
+    m_pBrush->SetColor(D2D1::ColorF(0x16C60C, 0.3f));
+    m_pRenderTarget->FillRectangle(highlightRect, m_pBrush.Get());
+
+    // Border
+    m_pBrush->SetColor(D2D1::ColorF(0x16C60C, 0.8f));
+    m_pRenderTarget->DrawRectangle(highlightRect, m_pBrush.Get(), 3.0f);
+}
+
 void DxRenderer::InitPalette() {
     // Standard 16 colors (Windows Terminal inspired)
     m_palette[0]  = D2D1::ColorF(0x0C0C0C); // Black
