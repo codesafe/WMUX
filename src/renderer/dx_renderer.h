@@ -35,11 +35,16 @@ public:
         uint32_t frame = 0;
         const std::map<std::pair<int, int>, Cell>* scrambledCells = nullptr;
     };
+    struct ImeComposition {
+        bool active = false;
+        std::wstring text;
+    };
 
     void RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
                     bool isActive, bool isZoomed, bool scrollbarDragging = false,
                     const Selection* sel = nullptr, bool dimInactive = true,
-                    const IdleEffect* idleEffect = nullptr);
+                    const IdleEffect* idleEffect = nullptr,
+                    const ImeComposition* ime = nullptr);
     void RenderSeparator(float x1, float y1, float x2, float y2);
     void RenderStatusBar(float y, float width, const std::wstring& leftText,
                          const std::wstring& rightText = L"", bool isZoomed = false);

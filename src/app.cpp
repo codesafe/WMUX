@@ -1,6 +1,7 @@
 ﻿#include "app.h"
 #include "settings_dialog.h"
 #include "drop_target.h"
+#include "url_detect.h"
 #include <imm.h>
 #include <ole2.h>
 #include <shellapi.h>
@@ -12,6 +13,7 @@
 #define VK_PROCESSKEY 0xE5
 #endif
 
+static int CharClass(wchar_t ch);
 static bool IsWordChar(wchar_t ch);
 
 UINT App::GetAddPaneMessage() {
@@ -259,7 +261,36 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                 ImmReleaseContext(m_hwnd, hImc);
             }
         }
+
+        // In NORMAL mode, show composing character in the pane
+        if (m_inputMode == InputMode::Normal && (lParam & GCS_COMPSTR)) {
+            HIMC hImc = ImmGetContext(m_hwnd);
+            if (hImc) {
+                LONG bytes = ImmGetCompositionStringW(hImc, GCS_COMPSTR, nullptr, 0);
+                if (bytes > 0) {
+                    m_imeCompStr.resize(bytes / sizeof(wchar_t));
+                    ImmGetCompositionStringW(hImc, GCS_COMPSTR, &m_imeCompStr[0], bytes);
+                    m_imeComposing = true;
+                } else {
+                    m_imeComposing = false;
+                    m_imeCompStr.clear();
+                }
+                ImmReleaseContext(m_hwnd, hImc);
+                InvalidateRect(m_hwnd, nullptr, FALSE);
+            }
+        }
+        if (lParam & GCS_RESULTSTR) {
+            m_imeComposing = false;
+            m_imeCompStr.clear();
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+        }
         return DefWindowProc(m_hwnd, msg, wParam, lParam);
+
+    case WM_IME_ENDCOMPOSITION:
+        m_imeComposing = false;
+        m_imeCompStr.clear();
+        InvalidateRect(m_hwnd, nullptr, FALSE);
+        return 0;
 
     case WM_MOUSEWHEEL:
         RegisterUserActivity();
@@ -661,8 +692,11 @@ void App::OnPaint() {
                 idleEffect.scrambledCells = &it->second;
             const DxRenderer::IdleEffect* pIdleEffect = (m_idleScrambleActive || idleEffect.scrambledCells) ? &idleEffect : nullptr;
 
+            DxRenderer::ImeComposition imeComp{m_imeComposing, m_imeCompStr};
+            const DxRenderer::ImeComposition* pIme = m_imeComposing ? &imeComp : nullptr;
+
             m_renderer.RenderPane(node->pane->GetBuffer(), fullRect, true, true, dragging, pSel,
-                                  m_settings.dimInactivePanes, pIdleEffect);
+                                  m_settings.dimInactivePanes, pIdleEffect, pIme);
         }
     } else {
         SplitNode* activeNode = m_paneManager.GetActiveNode();
@@ -683,8 +717,11 @@ void App::OnPaint() {
                 idleEffect.scrambledCells = &it->second;
             const DxRenderer::IdleEffect* pIdleEffect = (m_idleScrambleActive || idleEffect.scrambledCells) ? &idleEffect : nullptr;
 
+            DxRenderer::ImeComposition imeComp{m_imeComposing, m_imeCompStr};
+            const DxRenderer::ImeComposition* pIme = (isActive && m_imeComposing) ? &imeComp : nullptr;
+
             m_renderer.RenderPane(node.pane->GetBuffer(), node.rect, isActive, false, dragging, pSel,
-                                  m_settings.dimInactivePanes, pIdleEffect);
+                                  m_settings.dimInactivePanes, pIdleEffect, pIme);
         });
 
         std::vector<PaneManager::SeparatorLine> seps;
@@ -1030,12 +1067,16 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
         switch (vk) {
         case VK_LEFT:
             if (ctrl) {
-                while (m_selEndCol > 0) {
-                    const Cell& c = buf.CellAtDocumentRow(m_selEndRow, m_selEndCol - 1);
-                    if (!IsWordChar(c.ch)) break;
-                    m_selEndCol--;
+                // Skip current word class, then stop
+                if (m_selEndCol > 0) {
+                    const Cell& cur = buf.CellAtDocumentRow(m_selEndRow, m_selEndCol - 1);
+                    int cls = CharClass(cur.ch);
+                    while (m_selEndCol > 0) {
+                        const Cell& c = buf.CellAtDocumentRow(m_selEndRow, m_selEndCol - 1);
+                        if (CharClass(c.ch) != cls) break;
+                        m_selEndCol--;
+                    }
                 }
-                if (m_selEndCol > 0) m_selEndCol--;
             } else {
                 if (m_selEndCol > 0) m_selEndCol--;
                 else if (m_selEndRow > 0) { m_selEndRow--; m_selEndCol = buf.GetCols() - 1; }
@@ -1043,12 +1084,15 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
             break;
         case VK_RIGHT:
             if (ctrl) {
-                while (m_selEndCol < buf.GetCols() - 1) {
-                    const Cell& c = buf.CellAtDocumentRow(m_selEndRow, m_selEndCol + 1);
-                    if (!IsWordChar(c.ch)) break;
-                    m_selEndCol++;
+                if (m_selEndCol < buf.GetCols() - 1) {
+                    const Cell& cur = buf.CellAtDocumentRow(m_selEndRow, m_selEndCol + 1);
+                    int cls = CharClass(cur.ch);
+                    while (m_selEndCol < buf.GetCols() - 1) {
+                        const Cell& c = buf.CellAtDocumentRow(m_selEndRow, m_selEndCol + 1);
+                        if (CharClass(c.ch) != cls) break;
+                        m_selEndCol++;
+                    }
                 }
-                if (m_selEndCol < buf.GetCols() - 1) m_selEndCol++;
             } else {
                 if (m_selEndCol < buf.GetCols() - 1) m_selEndCol++;
                 else if (m_selEndRow < maxDocumentRow) { m_selEndRow++; m_selEndCol = 0; }
@@ -1482,13 +1526,40 @@ void App::MouseToCell(int mx, int my, Pane* pane, D2D1_RECT_F rect, int& row, in
     }
 }
 
+// 0=whitespace/control, 1=ASCII word, 2=Hangul, 3=CJK, 4=delimiter/symbol
+static int CharClass(wchar_t ch) {
+    if (ch <= L' ') return 0;
+    if ((ch >= L'A' && ch <= L'Z') || (ch >= L'a' && ch <= L'z') ||
+        (ch >= L'0' && ch <= L'9') || ch == L'_')
+        return 1;
+    // Hangul Jamo + Compatibility Jamo + Syllables + Extended
+    if ((ch >= 0x1100 && ch <= 0x11FF) ||
+        (ch >= 0x3130 && ch <= 0x318F) ||
+        (ch >= 0xAC00 && ch <= 0xD7A3) ||
+        (ch >= 0xA960 && ch <= 0xA97C) ||
+        (ch >= 0xD7B0 && ch <= 0xD7FB))
+        return 2;
+    // CJK Unified Ideographs + Extension A + Radicals
+    if ((ch >= 0x2E80 && ch <= 0x2FFF) ||
+        (ch >= 0x3400 && ch <= 0x4DBF) ||
+        (ch >= 0x4E00 && ch <= 0x9FFF) ||
+        (ch >= 0xF900 && ch <= 0xFAFF))
+        return 3;
+    // Fullwidth Latin
+    if (ch >= 0xFF01 && ch <= 0xFF5E) return 1;
+    // Fullwidth Hangul
+    if (ch >= 0xFFA0 && ch <= 0xFFDC) return 2;
+    // Common delimiters
+    if (ch == L'(' || ch == L')' || ch == L'[' || ch == L']' ||
+        ch == L'{' || ch == L'}' || ch == L'<' || ch == L'>' ||
+        ch == L'"' || ch == L'\'' || ch == L',' || ch == L';' || ch == L'`')
+        return 4;
+    // Other ASCII symbols: treat as word to allow path/URL selection
+    return 1;
+}
+
 static bool IsWordChar(wchar_t ch) {
-    if (ch <= L' ') return false;
-    // Treat common delimiters as non-word
-    return ch != L' ' && ch != L'\t' && ch != L'(' && ch != L')' &&
-           ch != L'[' && ch != L']' && ch != L'{' && ch != L'}' &&
-           ch != L'<' && ch != L'>' && ch != L'"' && ch != L'\'' &&
-           ch != L',' && ch != L';' && ch != L'`';
+    return CharClass(ch) != 0 && CharClass(ch) != 4;
 }
 
 void App::OnLButtonDblClk(int x, int y) {
@@ -1526,25 +1597,64 @@ void App::OnLButtonDblClk(int x, int y) {
     int cols = buf.GetCols();
     if (row >= buf.GetRows() || col >= cols) return;
 
-    const Cell& clicked = (buf.GetScrollOffset() > 0)
-        ? buf.ViewAt(row, col) : buf.At(row, col);
-    if (!IsWordChar(clicked.ch)) return;
+    bool useView = (buf.GetScrollOffset() > 0);
+    auto cellAt = [&](int r, int c) -> const Cell& {
+        return useView ? buf.ViewAt(r, c) : buf.At(r, c);
+    };
 
-    // Expand left
+    // Check if clicked on a URL — open it and select the URL range
+    auto rowCharAt = [&](int c2) -> wchar_t {
+        if (c2 < 0 || c2 >= cols) return 0;
+        return cellAt(row, c2).ch;
+    };
+    auto urlSpans = DetectUrls(cols, rowCharAt);
+    for (auto& u : urlSpans) {
+        if (col >= u.startCol && col <= u.endCol) {
+            std::wstring url = ExtractUrlString(u.startCol, u.endCol, rowCharAt);
+            if (!url.empty())
+                ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+
+            m_selectPane = pane;
+            m_selectPaneRect = rect;
+            int documentRow = buf.ViewRowToDocumentRow(row);
+            m_selStartRow = documentRow;
+            m_selStartCol = u.startCol;
+            m_selEndRow = documentRow;
+            m_selEndCol = u.endCol;
+            m_hasSelection = true;
+            m_selecting = false;
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+            return;
+        }
+    }
+
+    // If clicked on trail half of wide char, snap to lead cell
+    if (cellAt(row, col).width == 0 && col > 0)
+        col--;
+
+    const Cell& clicked = cellAt(row, col);
+    int cls = CharClass(clicked.ch);
+    if (cls == 0 || cls == 4) return;
+
+    // Expand left (same character class)
     int left = col;
     while (left > 0) {
-        const Cell& c = (buf.GetScrollOffset() > 0)
-            ? buf.ViewAt(row, left - 1) : buf.At(row, left - 1);
-        if (!IsWordChar(c.ch)) break;
-        left--;
+        int prev = left - 1;
+        const Cell& c = cellAt(row, prev);
+        if (c.width == 0 && prev > 0) prev--;
+        if (CharClass(cellAt(row, prev).ch) != cls) break;
+        left = prev;
     }
-    // Expand right
+    // Expand right (same character class)
     int right = col;
+    if (clicked.width == 2) right++;
     while (right < cols - 1) {
-        const Cell& c = (buf.GetScrollOffset() > 0)
-            ? buf.ViewAt(row, right + 1) : buf.At(row, right + 1);
-        if (!IsWordChar(c.ch)) break;
-        right++;
+        int next = right + 1;
+        const Cell& c = cellAt(row, next);
+        if (c.width == 0) { right = next; continue; }
+        if (CharClass(c.ch) != cls) break;
+        right = next;
+        if (c.width == 2 && right + 1 < cols) right++;
     }
 
     m_selectPane = pane;

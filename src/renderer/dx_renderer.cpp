@@ -1,4 +1,5 @@
 ﻿#include "renderer/dx_renderer.h"
+#include "url_detect.h"
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
 
@@ -34,7 +35,7 @@ const wchar_t* const kHelpLines[] = {
     L"  left drag        select text and activate pane",
     L"  Shift+left drag  start pane drag",
     L"  drop preview     split top/right/bottom/left or swap",
-    L"  double click     select word",
+    L"  double click     select word (open URL if on link)",
     L"  right click      copy selection or paste",
     L"  mouse wheel      scrollback on hovered pane",
     L"  scrollbar drag   adjust scroll position",
@@ -402,7 +403,8 @@ static void ApplyIdleScrambleGlyph(int documentRow, int col, uint32_t frame, Cel
 void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
                              bool isActive, bool isZoomed, bool scrollbarDragging,
                              const Selection* sel, bool dimInactive,
-                             const IdleEffect* idleEffect) {
+                             const IdleEffect* idleEffect,
+                             const ImeComposition* ime) {
     m_pRenderTarget->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
 
     // Fill pane background
@@ -473,6 +475,20 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
         float y2 = floorf(contentRect.top + (r + 1) * m_cellHeight);
         if (y >= contentRect.bottom) break;
         int documentRow = buffer.ViewRowToDocumentRow(r);
+
+        // Detect URLs in this row
+        auto rowCharAt = [&](int col) -> wchar_t {
+            if (col < 0 || col >= cols) return 0;
+            const Cell& c2 = useViewAt ? buffer.ViewAt(r, col) : buffer.At(r, col);
+            return c2.ch;
+        };
+        auto urlSpans = DetectUrls(cols, rowCharAt);
+        auto isInUrl = [&](int col) -> bool {
+            for (auto& u : urlSpans)
+                if (col >= u.startCol && col <= u.endCol) return true;
+            return false;
+        };
+
         for (int c = 0; c < cols; c++) {
             const Cell& sourceCell = useViewAt ? buffer.ViewAt(r, c) : buffer.At(r, c);
             if (sourceCell.width == 0) continue;
@@ -505,6 +521,7 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
 
             bool isCursor = !useViewAt && cursorVisible &&
                             r == cursorRow && c == cursorCol;
+            bool cellIsUrl = !scrambled && isInUrl(c);
 
             D2D1_COLOR_F fg = GetCellFgColor(cell);
             D2D1_COLOR_F bg = GetCellBgColor(cell);
@@ -521,6 +538,8 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
                     0.78f,
                     0.40f + ((documentRow + idleEffect->frame) % 10) / 40.0f,
                     1.0f);
+            } else if (cellIsUrl) {
+                fg = D2D1::ColorF(0.4f, 0.7f, 1.0f, 1.0f);
             }
 
             D2D1_RECT_F cellRect = {x, y, x2, y2};
@@ -533,7 +552,7 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
                 m_pRenderTarget->FillRectangle(cellRect, m_pBrush.Get());
             }
 
-            if (cell.flags & CELL_UNDERLINE) {
+            if (cell.flags & CELL_UNDERLINE || cellIsUrl) {
                 m_pBrush->SetColor(fg);
                 m_pRenderTarget->FillRectangle({x, y2 - 1, x2, y2}, m_pBrush.Get());
             }
@@ -714,6 +733,32 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
             }
             m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
         }
+    }
+
+    // IME composition overlay at cursor position
+    if (ime && ime->active && !ime->text.empty() && !useViewAt && cursorVisible) {
+        int imeWidth = 0;
+        for (wchar_t wc : ime->text) {
+            imeWidth += (wc >= 0x1100 && wc <= 0x115F) || (wc >= 0xAC00 && wc <= 0xD7A3) ||
+                        (wc >= 0x2E80 && wc <= 0x9FFF) || (wc >= 0xF900 && wc <= 0xFAFF) ? 2 : 1;
+        }
+        float ix = floorf(contentRect.left + cursorCol * m_cellWidth);
+        float iy = floorf(contentRect.top + cursorRow * m_cellHeight);
+        float iw = imeWidth * m_cellWidth;
+        D2D1_RECT_F imeRect = {ix, iy, ix + iw, iy + m_cellHeight};
+
+        m_pBrush->SetColor(m_defaultBg);
+        m_pRenderTarget->FillRectangle(imeRect, m_pBrush.Get());
+
+        m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        m_pBrush->SetColor(m_defaultFg);
+        m_pRenderTarget->DrawText(ime->text.c_str(), static_cast<UINT32>(ime->text.size()),
+                                  m_pTextFormat.Get(), imeRect, m_pBrush.Get(),
+                                  D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+
+        m_pBrush->SetColor(m_defaultFg);
+        m_pRenderTarget->FillRectangle({ix, iy + m_cellHeight - 2, ix + iw, iy + m_cellHeight}, m_pBrush.Get());
     }
 
     // Custom scrollbar overlay

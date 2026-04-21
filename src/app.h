@@ -129,6 +129,10 @@ private:
     float m_helpDragStartY = 0;
     int m_helpScrollOffsetAtDragStart = 0;
 
+    // IME composition state
+    bool m_imeComposing = false;
+    std::wstring m_imeCompStr;
+
     // Pane drag state
     bool m_draggingPane = false;
     Pane* m_draggedPane = nullptr;

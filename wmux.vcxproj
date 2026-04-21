@@ -129,6 +129,7 @@
     <ClInclude Include="src\renderer\dx_renderer.h" />
     <ClInclude Include="src\pane\pane.h" />
     <ClInclude Include="src\pane\pane_tree.h" />
+    <ClInclude Include="src\url_detect.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="src\wmux.rc" />
