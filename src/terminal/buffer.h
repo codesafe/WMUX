@@ -27,11 +27,40 @@ struct Cell {
     uint8_t width = 1;  // 1=normal, 2=wide char lead, 0=wide char trail
 };
 
+struct TerminalBufferSnapshot {
+    std::vector<Cell> cells;
+    int cols = 0;
+    int rows = 0;
+    int cursorRow = 0;
+    int cursorCol = 0;
+    bool wrapPending = false;
+    Cell attr;
+    int scrollTop = 0;
+    int scrollBottom = 0;
+    bool cursorVisible = true;
+    bool appCursorKeys = false;
+    bool bracketedPaste = false;
+    std::string title;
+    int savedCursorRow = 0;
+    int savedCursorCol = 0;
+    Cell savedAttr;
+    std::deque<std::vector<Cell>> scrollback;
+    int scrollOffset = 0;
+    int maxScrollback = 10000;
+    bool altScreenActive = false;
+    std::vector<Cell> savedMainBuffer;
+    int savedMainCursorRow = 0;
+    int savedMainCursorCol = 0;
+    Cell savedMainAttr;
+};
+
 class TerminalBuffer {
 public:
     TerminalBuffer() = default;
     void Init(int cols, int rows);
     void Resize(int cols, int rows);
+    TerminalBufferSnapshot CreateSnapshot() const;
+    void LoadSnapshot(const TerminalBufferSnapshot& snapshot);
 
     int GetCols() const { return m_cols; }
     int GetRows() const { return m_rows; }

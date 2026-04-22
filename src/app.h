@@ -5,7 +5,9 @@
 #include <map>
 #include <string>
 #include "renderer/dx_renderer.h"
+#include "pane/pane_factory.h"
 #include "pane/pane_tree.h"
+#include "pane/pane_session.h"
 #include "settings.h"
 
 class DropTarget;
@@ -15,11 +17,12 @@ enum class SelectionGranularity { Character, Word, Line };
 
 class App {
 public:
-    bool Initialize(HINSTANCE hInstance, int nCmdShow);
+    bool Initialize(HINSTANCE hInstance, int nCmdShow,
+                    const std::wstring& startupSessionId = L"",
+                    const std::wstring& startupWorkingDir = L"");
     int Run();
     ~App();
-    static UINT GetAddPaneMessage();
-    static ULONG_PTR GetAddPaneCopyDataId();
+    static ULONG_PTR GetAttachPaneCopyDataId();
 
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -39,18 +42,22 @@ private:
     void OnRButtonUp(int x, int y);
     void OnPtyOutput(WPARAM wParam, LPARAM lParam);
     void OnDpiChanged(UINT dpi, const RECT& suggestedRect);
-    void AddPaneFromExternalRequest(const std::wstring& workingDir = L"");
+    bool AttachExternalSession(const std::wstring& sessionId, int zone);
+    PaneDescriptor DescribeActivePane() const;
 
     void SplitActivePane(SplitDirection dir);
+    void OpenDetachablePaneWindow();
     void CloseActivePane();
+    void DetachActivePaneToNewWindow();
+    void RelayoutAfterPaneRemoval();
     void OpenSettings();
     void UpdateTitleBar();
     void RelayoutPanes();
     void CopySelection();
     void PasteClipboard();
     void ClearSelection();
-    void SelectAllVisible(Pane* pane);
-    void SelectLineAt(Pane* pane, int row);
+    void SelectAllVisible(IPaneSession* pane);
+    void SelectLineAt(IPaneSession* pane, int row);
     void EnterPrefixMode();
     void ExitPrefixMode();
     void UpdateSelectionAutoScroll();
@@ -60,18 +67,18 @@ private:
     void UpdateIdleScrambleState();
     void UpdateScrambledCells();
     void UpdateDragSelection(int x, int y);
-    void ExpandWordSelection(Pane* pane, int viewRow, int col,
+    void ExpandWordSelection(IPaneSession* pane, int viewRow, int col,
                              int& startRow, int& startCol,
                              int& endRow, int& endCol);
-    void ExpandLineSelection(Pane* pane, int viewRow,
+    void ExpandLineSelection(IPaneSession* pane, int viewRow,
                              int& startRow, int& startCol,
                              int& endRow, int& endCol);
     void CancelMouseOperation();
 
     // Scrollbar drag helpers
-    bool HitTestScrollbar(float px, float py, Pane*& outPane, D2D1_RECT_F& outRect);
+    bool HitTestScrollbar(float px, float py, IPaneSession*& outPane, D2D1_RECT_F& outRect);
     void ApplyScrollbarDrag(int mouseY);
-    void MouseToCell(int mx, int my, Pane* pane, D2D1_RECT_F rect, int& row, int& col);
+    void MouseToCell(int mx, int my, IPaneSession* pane, D2D1_RECT_F rect, int& row, int& col);
 
     // Separator drag helpers
     bool HitTestSeparator(float px, float py, SplitNode*& outNode);
@@ -93,7 +100,7 @@ private:
 
     // Scrollbar drag state
     bool m_draggingScrollbar = false;
-    Pane* m_dragPane = nullptr;
+    IPaneSession* m_dragPane = nullptr;
     D2D1_RECT_F m_dragPaneRect = {};
     int m_wheelDeltaRemainder = 0;
 
@@ -105,7 +112,7 @@ private:
     // Text selection state
     bool m_selecting = false;
     bool m_hasSelection = false;
-    Pane* m_selectPane = nullptr;
+    IPaneSession* m_selectPane = nullptr;
     D2D1_RECT_F m_selectPaneRect = {};
     int m_selStartRow = 0, m_selStartCol = 0;
     int m_selEndRow = 0, m_selEndCol = 0;
@@ -115,12 +122,12 @@ private:
     int m_lastMouseX = 0, m_lastMouseY = 0;
     DWORD m_lastDblClickTick = 0;
     int m_lastDblClickRow = -1;
-    Pane* m_lastDblClickPane = nullptr;
+    IPaneSession* m_lastDblClickPane = nullptr;
     ULONGLONG m_lastUserInputTick = 0;
     bool m_idleScrambleActive = false;
     uint32_t m_idleScrambleFrame = 0;
     // Store scrambled cells: pane -> (documentRow, col) -> scrambled cell
-    std::map<Pane*, std::map<std::pair<int, int>, Cell>> m_scrambledCells;
+    std::map<IPaneSession*, std::map<std::pair<int, int>, Cell>> m_scrambledCells;
 
     // Help popup state
     bool m_showHelp = false;
@@ -135,10 +142,20 @@ private:
 
     // Pane drag state
     bool m_draggingPane = false;
-    Pane* m_draggedPane = nullptr;
+    IPaneSession* m_draggedPane = nullptr;
     SplitNode* m_draggedNode = nullptr;
-    Pane* m_dropTargetPane = nullptr;
+    IPaneSession* m_dropTargetPane = nullptr;
     int m_dropZone = -1;  // 0=top, 1=right, 2=bottom, 3=left, 4=center(swap)
+    HWND m_externalDropTarget = nullptr;  // target wmux window for cross-window drag
+
+    // External drag preview (target side - when another wmux drags toward us)
+    bool m_externalDragPreview = false;
+    D2D1_RECT_F m_externalPreviewRect = {};
+    int m_externalPreviewZone = -1;
+
+    static UINT GetDragPreviewMsg();
+    void SendDragPreview(HWND target, int screenX, int screenY);
+    void CancelDragPreview(HWND target);
 
     static constexpr UINT WM_PTY_OUTPUT = WM_APP + 1;
     static constexpr UINT TIMER_CLOCK = 1;

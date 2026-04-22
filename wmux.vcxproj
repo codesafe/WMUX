@@ -114,7 +114,11 @@
     <ClCompile Include="src\terminal\parser.cpp" />
     <ClCompile Include="src\renderer\dx_renderer.cpp" />
     <ClCompile Include="src\pane\pane.cpp" />
+    <ClCompile Include="src\pane\pane_factory.cpp" />
     <ClCompile Include="src\pane\pane_tree.cpp" />
+    <ClCompile Include="src\pane\remote_pane_session.cpp" />
+    <ClCompile Include="src\pane\session_host.cpp" />
+    <ClCompile Include="src\pane\session_protocol.cpp" />
     <ClCompile Include="src\settings.cpp" />
     <ClCompile Include="src\settings_dialog.cpp" />
   </ItemGroup>
@@ -128,7 +132,12 @@
     <ClInclude Include="src\terminal\parser.h" />
     <ClInclude Include="src\renderer\dx_renderer.h" />
     <ClInclude Include="src\pane\pane.h" />
+    <ClInclude Include="src\pane\pane_factory.h" />
+    <ClInclude Include="src\pane\pane_session.h" />
     <ClInclude Include="src\pane\pane_tree.h" />
+    <ClInclude Include="src\pane\remote_pane_session.h" />
+    <ClInclude Include="src\pane\session_host.h" />
+    <ClInclude Include="src\pane\session_protocol.h" />
     <ClInclude Include="src\url_detect.h" />
   </ItemGroup>
   <ItemGroup>

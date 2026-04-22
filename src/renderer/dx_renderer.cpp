@@ -27,13 +27,15 @@ const wchar_t* const kHelpLines[] = {
     L"  Ctrl+A          select all",
     L"  Ctrl+C          copy selection or send SIGINT",
     L"  Ctrl+V          paste",
+    L"  Ctrl+Shift+D    detach current pane to a new wmux window",
+    L"  Ctrl+Shift+R    open a new empty wmux window",
     L"  Shift+PageUp    scrollback up",
     L"  Shift+PageDown  scrollback down",
     L"",
     L"=== Mouse ===",
     L"",
     L"  left drag        select text and activate pane",
-    L"  Shift+left drag  start pane drag",
+    L"  Shift+left drag  move pane (within or between windows)",
     L"  drop preview     split top/right/bottom/left or swap",
     L"  double click     select word (open URL if on link)",
     L"  right click      copy selection or paste",
@@ -677,6 +679,51 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
                     m_pRenderTarget->FillRectangle({mx - 1.5f, y - 0.5f, mx - 0.5f, y2 + 0.5f}, m_pBrush.Get());
                     m_pRenderTarget->FillRectangle({mx + 0.5f, y - 0.5f, mx + 1.5f, y2 + 0.5f}, m_pBrush.Get());
                     break;
+                case 0x256D: case 0x256E: case 0x256F: case 0x2570: {
+                    // Rounded corners: ╭ ╮ ╯ ╰
+                    float radius = (std::min)(cw, ch2f) * 0.5f;
+                    ComPtr<ID2D1PathGeometry> pathGeometry;
+                    if (SUCCEEDED(m_pFactory->CreatePathGeometry(pathGeometry.GetAddressOf()))) {
+                        ComPtr<ID2D1GeometrySink> sink;
+                        if (SUCCEEDED(pathGeometry->Open(sink.GetAddressOf()))) {
+                            D2D1_POINT_2F p0, p1, p2, p3;
+                            if (ch == 0x256D) { // ╭ connects → and ↓
+                                p0 = {mx, y2 + 0.5f};
+                                p1 = {mx, my + radius};
+                                p2 = {mx + radius, my};
+                                p3 = {x2 + 0.5f, my};
+                            } else if (ch == 0x256E) { // ╮ connects ← and ↓
+                                p0 = {x - 0.5f, my};
+                                p1 = {mx - radius, my};
+                                p2 = {mx, my + radius};
+                                p3 = {mx, y2 + 0.5f};
+                            } else if (ch == 0x256F) { // ╯ connects ← and ↑
+                                p0 = {mx, y - 0.5f};
+                                p1 = {mx, my - radius};
+                                p2 = {mx - radius, my};
+                                p3 = {x - 0.5f, my};
+                            } else { // ╰ connects → and ↑
+                                p0 = {x2 + 0.5f, my};
+                                p1 = {mx + radius, my};
+                                p2 = {mx, my - radius};
+                                p3 = {mx, y - 0.5f};
+                            }
+                            sink->BeginFigure(p0, D2D1_FIGURE_BEGIN_HOLLOW);
+                            sink->AddLine(p1);
+                            sink->AddArc(D2D1::ArcSegment(p2,
+                                D2D1::SizeF(radius, radius), 0.0f,
+                                D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                                D2D1_ARC_SIZE_SMALL));
+                            sink->AddLine(p3);
+                            sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                            sink->Close();
+                            m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                            m_pRenderTarget->DrawGeometry(pathGeometry.Get(), m_pBrush.Get(), 1.0f);
+                            m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+                        }
+                    }
+                    break;
+                }
                 default: // Fallback: draw with font for unhandled box-drawing
                     m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
                     m_pRenderTarget->DrawText(&cell.ch, 1, m_pTextFormat.Get(),

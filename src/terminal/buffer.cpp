@@ -12,9 +12,104 @@ void TerminalBuffer::Init(int cols, int rows) {
     m_attr = Cell{};
 }
 
+TerminalBufferSnapshot TerminalBuffer::CreateSnapshot() const {
+    TerminalBufferSnapshot snapshot;
+    snapshot.cells = m_cells;
+    snapshot.cols = m_cols;
+    snapshot.rows = m_rows;
+    snapshot.cursorRow = m_cursorRow;
+    snapshot.cursorCol = m_cursorCol;
+    snapshot.wrapPending = m_wrapPending;
+    snapshot.attr = m_attr;
+    snapshot.scrollTop = m_scrollTop;
+    snapshot.scrollBottom = m_scrollBottom;
+    snapshot.cursorVisible = m_cursorVisible;
+    snapshot.appCursorKeys = m_appCursorKeys;
+    snapshot.bracketedPaste = m_bracketedPaste;
+    snapshot.title = m_title;
+    snapshot.savedCursorRow = m_savedCursorRow;
+    snapshot.savedCursorCol = m_savedCursorCol;
+    snapshot.savedAttr = m_savedAttr;
+    snapshot.scrollback = m_scrollback;
+    snapshot.scrollOffset = m_scrollOffset;
+    snapshot.maxScrollback = m_maxScrollback;
+    snapshot.altScreenActive = m_altScreenActive;
+    snapshot.savedMainBuffer = m_savedMainBuffer;
+    snapshot.savedMainCursorRow = m_savedMainCursorRow;
+    snapshot.savedMainCursorCol = m_savedMainCursorCol;
+    snapshot.savedMainAttr = m_savedMainAttr;
+    return snapshot;
+}
+
+void TerminalBuffer::LoadSnapshot(const TerminalBufferSnapshot& snapshot) {
+    m_cells = snapshot.cells;
+    m_cols = snapshot.cols;
+    m_rows = snapshot.rows;
+    m_cursorRow = snapshot.cursorRow;
+    m_cursorCol = snapshot.cursorCol;
+    m_wrapPending = snapshot.wrapPending;
+    m_attr = snapshot.attr;
+    m_scrollTop = snapshot.scrollTop;
+    m_scrollBottom = snapshot.scrollBottom;
+    m_cursorVisible = snapshot.cursorVisible;
+    m_appCursorKeys = snapshot.appCursorKeys;
+    m_bracketedPaste = snapshot.bracketedPaste;
+    m_title = snapshot.title;
+    m_savedCursorRow = snapshot.savedCursorRow;
+    m_savedCursorCol = snapshot.savedCursorCol;
+    m_savedAttr = snapshot.savedAttr;
+    m_scrollback = snapshot.scrollback;
+    m_scrollOffset = snapshot.scrollOffset;
+    m_maxScrollback = snapshot.maxScrollback;
+    m_altScreenActive = snapshot.altScreenActive;
+    m_savedMainBuffer = snapshot.savedMainBuffer;
+    m_savedMainCursorRow = snapshot.savedMainCursorRow;
+    m_savedMainCursorCol = snapshot.savedMainCursorCol;
+    m_savedMainAttr = snapshot.savedMainAttr;
+}
+
 void TerminalBuffer::Resize(int newCols, int newRows) {
     if (newCols == m_cols && newRows == m_rows)
         return;
+
+    if (newRows < m_rows && !m_altScreenActive) {
+        int lastContentRow = m_rows - 1;
+        while (lastContentRow > m_cursorRow) {
+            bool empty = true;
+            for (int c = 0; c < m_cols; c++) {
+                const Cell& cell = At(lastContentRow, c);
+                if (cell.ch != L' ' && cell.ch != 0 && cell.width > 0) {
+                    empty = false;
+                    break;
+                }
+            }
+            if (!empty) break;
+            lastContentRow--;
+        }
+
+        int contentRows = lastContentRow + 1;
+        int excessRows = contentRows - newRows;
+        if (excessRows > 0) {
+            for (int r = 0; r < excessRows; r++) {
+                std::vector<Cell> line(m_cols);
+                for (int c = 0; c < m_cols; c++)
+                    line[c] = At(r, c);
+                m_scrollback.push_back(std::move(line));
+                if (static_cast<int>(m_scrollback.size()) > m_maxScrollback)
+                    m_scrollback.pop_front();
+            }
+
+            for (int r = 0; r < m_rows - excessRows; r++) {
+                for (int c = 0; c < m_cols; c++)
+                    At(r, c) = At(r + excessRows, c);
+            }
+
+            m_cursorRow -= excessRows;
+            if (m_cursorRow < 0) m_cursorRow = 0;
+            m_savedCursorRow -= excessRows;
+            if (m_savedCursorRow < 0) m_savedCursorRow = 0;
+        }
+    }
 
     std::vector<Cell> newCells(static_cast<size_t>(newCols) * newRows, Cell{});
     int copyRows = (std::min)(m_rows, newRows);

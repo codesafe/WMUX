@@ -5,6 +5,7 @@
 #include <imm.h>
 #include <ole2.h>
 #include <shellapi.h>
+#include <sstream>
 
 #pragma comment(lib, "imm32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -15,15 +16,82 @@
 
 static int CharClass(wchar_t ch);
 static bool IsWordChar(wchar_t ch);
+static void AppendQuotedArg(std::wstring& command, const std::wstring& arg);
+static UINT NormalizeKey(WPARAM vk, LPARAM flags);
 
-UINT App::GetAddPaneMessage() {
-    static UINT msg = RegisterWindowMessageW(L"WMUX_ADD_PANE_MESSAGE");
+static void AppendRuntimeLog(const std::wstring& message) {
+    wchar_t tempPath[MAX_PATH] = {};
+    DWORD len = GetTempPathW(MAX_PATH, tempPath);
+    if (len == 0 || len >= MAX_PATH)
+        return;
+
+    std::wstring path = tempPath;
+    path += L"wmux_runtime.log";
+
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return;
+
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    std::wstringstream line;
+    line << L"[app " << GetCurrentProcessId() << L"] "
+         << st.wHour << L":" << st.wMinute << L":" << st.wSecond << L"."
+         << st.wMilliseconds << L" " << message << L"\r\n";
+    std::wstring text = line.str();
+
+    DWORD written = 0;
+    WriteFile(file, text.data(),
+              static_cast<DWORD>(text.size() * sizeof(wchar_t)),
+              &written, nullptr);
+    CloseHandle(file);
+}
+
+static int CountVisibleCells(const TerminalBuffer& buffer) {
+    int count = 0;
+    for (int r = 0; r < buffer.GetRows(); ++r) {
+        for (int c = 0; c < buffer.GetCols(); ++c) {
+            const Cell& cell = buffer.At(r, c);
+            if (cell.width > 0 && cell.ch != 0 && cell.ch != L' ')
+                count++;
+        }
+    }
+    return count;
+}
+
+static UINT NormalizeKey(WPARAM vk, LPARAM flags) {
+    UINT key = static_cast<UINT>(vk);
+    if (key != VK_PROCESSKEY)
+        return key;
+
+    UINT scanCode = (static_cast<UINT>(flags) >> 16) & 0xFF;
+    if (flags & 0x01000000)
+        scanCode |= 0xE000;
+
+    UINT mapped = MapVirtualKeyW(scanCode, MAPVK_VSC_TO_VK_EX);
+    return mapped != 0 ? mapped : key;
+}
+
+ULONG_PTR App::GetAttachPaneCopyDataId() {
+    static constexpr ULONG_PTR kAttachPaneCopyDataId = 0x574D5559; // 'WMUY'
+    return kAttachPaneCopyDataId;
+}
+
+UINT App::GetDragPreviewMsg() {
+    static UINT msg = RegisterWindowMessageW(L"WmuxDragPreview");
     return msg;
 }
 
-ULONG_PTR App::GetAddPaneCopyDataId() {
-    static constexpr ULONG_PTR kAddPaneCopyDataId = 0x574D5558; // 'WMUX'
-    return kAddPaneCopyDataId;
+void App::SendDragPreview(HWND target, int screenX, int screenY) {
+    PostMessage(target, GetDragPreviewMsg(), 0,
+                MAKELPARAM(static_cast<WORD>(static_cast<short>(screenX)),
+                           static_cast<WORD>(static_cast<short>(screenY))));
+}
+
+void App::CancelDragPreview(HWND target) {
+    PostMessage(target, GetDragPreviewMsg(), 1, 0);
 }
 
 App::~App() {
@@ -38,7 +106,9 @@ App::~App() {
     }
 }
 
-bool App::Initialize(HINSTANCE hInstance, int nCmdShow) {
+bool App::Initialize(HINSTANCE hInstance, int nCmdShow,
+                     const std::wstring& startupSessionId,
+                     const std::wstring& startupWorkingDir) {
     m_hInstance = hInstance;
     m_settings.Load();
 
@@ -77,10 +147,19 @@ bool App::Initialize(HINSTANCE hInstance, int nCmdShow) {
     D2D1_RECT_F paneRect = {0, 0, static_cast<float>(rc.right),
                              static_cast<float>(rc.bottom) - statusH};
 
-    if (!m_paneManager.Initialize(paneRect, m_hwnd, WM_PTY_OUTPUT,
-                                   m_renderer.GetCellWidth(),
-                                   m_renderer.GetCellHeight()))
-        return false;
+    if (!startupSessionId.empty()) {
+        if (!m_paneManager.InitializeWithSession(
+                paneRect, m_hwnd, WM_PTY_OUTPUT,
+                m_renderer.GetCellWidth(), m_renderer.GetCellHeight(),
+                AttachPaneSession(startupSessionId)))
+            return false;
+    } else {
+        if (!m_paneManager.Initialize(paneRect, m_hwnd, WM_PTY_OUTPUT,
+                                       m_renderer.GetCellWidth(),
+                                       m_renderer.GetCellHeight(),
+                                       startupWorkingDir))
+            return false;
+    }
 
     // Initialize OLE for drag-and-drop
     HRESULT oleResult = OleInitialize(nullptr);
@@ -133,28 +212,59 @@ LRESULT CALLBACK App::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 }
 
 LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (msg == GetAddPaneMessage()) {
-        AddPaneFromExternalRequest();
-        return 0;
-    }
-
     switch (msg) {
     case WM_COPYDATA: {
         auto* copyData = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
-        if (!copyData || copyData->dwData != GetAddPaneCopyDataId())
+        if (!copyData)
             break;
 
-        std::wstring workingDir;
-        if (copyData->lpData && copyData->cbData >= sizeof(wchar_t)) {
-            size_t charCount = copyData->cbData / sizeof(wchar_t);
-            const auto* text = static_cast<const wchar_t*>(copyData->lpData);
-            if (text[charCount - 1] == L'\0')
-                charCount--;
-            workingDir.assign(text, charCount);
-        }
+        if (copyData->dwData == GetAttachPaneCopyDataId()) {
+            m_externalDragPreview = false;
+            std::wstring payload;
+            if (copyData->lpData && copyData->cbData >= sizeof(wchar_t)) {
+                size_t charCount = copyData->cbData / sizeof(wchar_t);
+                const auto* text = static_cast<const wchar_t*>(copyData->lpData);
+                if (text[charCount - 1] == L'\0')
+                    charCount--;
+                payload.assign(text, charCount);
+            }
 
-        AddPaneFromExternalRequest(workingDir);
-        return TRUE;
+            size_t sep = payload.find(L'\n');
+            if (sep == std::wstring::npos)
+                return FALSE;
+            std::wstring header = payload.substr(0, sep);
+            std::wstring sessionId = payload.substr(sep + 1);
+
+            int zone = 4;
+            size_t comma = header.find(L',');
+            if (comma != std::wstring::npos) {
+                int screenX = _wtoi(header.substr(0, comma).c_str());
+                int screenY = _wtoi(header.substr(comma + 1).c_str());
+                POINT pt = {screenX, screenY};
+                ScreenToClient(m_hwnd, &pt);
+
+                IPaneSession* targetPane = nullptr;
+                D2D1_RECT_F paneRect = {};
+                if (m_paneManager.FindPaneAndRectAtPoint(
+                        static_cast<float>(pt.x), static_cast<float>(pt.y),
+                        targetPane, paneRect)) {
+                    m_paneManager.SetActivePane(targetPane);
+                    float relX = static_cast<float>(pt.x - paneRect.left) /
+                                 (paneRect.right - paneRect.left);
+                    float relY = static_cast<float>(pt.y - paneRect.top) /
+                                 (paneRect.bottom - paneRect.top);
+                    const float edgeSize = 0.25f;
+                    if (relY < edgeSize) zone = 0;
+                    else if (relY > 1.0f - edgeSize) zone = 2;
+                    else if (relX < edgeSize) zone = 3;
+                    else if (relX > 1.0f - edgeSize) zone = 1;
+                }
+            } else {
+                zone = _wtoi(header.c_str());
+            }
+            return AttachExternalSession(sessionId, zone) ? TRUE : FALSE;
+        }
+        break;
     }
 
     case WM_SIZE:
@@ -336,7 +446,7 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
             } else {
                 SplitNode* node = nullptr;
-                Pane* pane = nullptr;
+                IPaneSession* pane = nullptr;
                 D2D1_RECT_F rect = {};
                 if (HitTestSeparator(static_cast<float>(mx), static_cast<float>(my), node)) {
                     if (node->direction == SplitDirection::Vertical)
@@ -430,6 +540,38 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
 
     default:
+        if (msg == GetDragPreviewMsg()) {
+            if (wParam == 1) {
+                m_externalDragPreview = false;
+            } else {
+                int sx = static_cast<int>(static_cast<short>(LOWORD(lParam)));
+                int sy = static_cast<int>(static_cast<short>(HIWORD(lParam)));
+                POINT pt = {sx, sy};
+                ScreenToClient(m_hwnd, &pt);
+
+                IPaneSession* pane = nullptr;
+                D2D1_RECT_F paneRect = {};
+                if (m_paneManager.FindPaneAndRectAtPoint(
+                        static_cast<float>(pt.x), static_cast<float>(pt.y), pane, paneRect)) {
+                    float relX = static_cast<float>(pt.x - paneRect.left) / (paneRect.right - paneRect.left);
+                    float relY = static_cast<float>(pt.y - paneRect.top) / (paneRect.bottom - paneRect.top);
+                    int zone = 4;
+                    const float edgeSize = 0.25f;
+                    if (relY < edgeSize) zone = 0;
+                    else if (relY > 1.0f - edgeSize) zone = 2;
+                    else if (relX < edgeSize) zone = 3;
+                    else if (relX > 1.0f - edgeSize) zone = 1;
+
+                    m_externalDragPreview = true;
+                    m_externalPreviewRect = paneRect;
+                    m_externalPreviewZone = zone;
+                } else {
+                    m_externalDragPreview = false;
+                }
+            }
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+            return 0;
+        }
         return DefWindowProc(m_hwnd, msg, wParam, lParam);
     }
 
@@ -449,7 +591,7 @@ void App::ExitPrefixMode() {
     UpdateTitleBar();
 }
 
-void App::SelectAllVisible(Pane* pane) {
+void App::SelectAllVisible(IPaneSession* pane) {
     if (!pane) return;
     auto& buf = pane->GetBuffer();
     m_selectPane = pane;
@@ -465,7 +607,7 @@ void App::SelectAllVisible(Pane* pane) {
     m_selecting = false;
 }
 
-void App::SelectLineAt(Pane* pane, int row) {
+void App::SelectLineAt(IPaneSession* pane, int row) {
     if (!pane) return;
     auto& buf = pane->GetBuffer();
     if (row < 0) row = 0;
@@ -730,13 +872,28 @@ void App::OnPaint() {
             m_renderer.RenderSeparator(s.x1, s.y1, s.x2, s.y2);
     }
 
+    if (IPaneSession* active = m_paneManager.GetActivePane()) {
+        static ULONGLONG s_lastPaintLogTick = 0;
+        ULONGLONG now = GetTickCount64();
+        if (now - s_lastPaintLogTick >= 500) {
+            s_lastPaintLogTick = now;
+            std::wstringstream ss;
+            ss << L"OnPaint active rows=" << active->GetBuffer().GetRows()
+               << L" cols=" << active->GetBuffer().GetCols()
+               << L" visibleCells=" << CountVisibleCells(active->GetBuffer())
+               << L" ready=" << (active->IsReady() ? 1 : 0)
+               << L" running=" << (active->IsRunning() ? 1 : 0);
+            AppendRuntimeLog(ss.str());
+        }
+    }
+
     // Status bar
     std::wstring statusLeft;
     std::wstring statusRight;
     int paneCount = 0;
     int currentPaneIndex = 0;
     int index = 0;
-    Pane* active = m_paneManager.GetActivePane();
+    IPaneSession* active = m_paneManager.GetActivePane();
 
     m_paneManager.ForEachLeaf([&](SplitNode& node) {
         index++;
@@ -809,6 +966,13 @@ void App::OnPaint() {
                 targetRect = node.rect;
         });
         m_renderer.RenderDropZone(targetRect, m_dropZone);
+    } else if (m_draggingPane && m_externalDropTarget && m_draggedNode) {
+        m_renderer.RenderDropZone(m_draggedNode->rect, 4);
+    }
+
+    // Render drop zone preview from external drag (another wmux dragging toward us)
+    if (m_externalDragPreview && m_externalPreviewZone >= 0) {
+        m_renderer.RenderDropZone(m_externalPreviewRect, m_externalPreviewZone);
     }
 
     // Render help popup if showing
@@ -851,13 +1015,14 @@ void App::OnDpiChanged(UINT dpi, const RECT& suggestedRect) {
     InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
-bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
+bool App::OnKeyDown(WPARAM vk, LPARAM flags) {
+    UINT key = NormalizeKey(vk, flags);
     bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
 
     // Alt+H: Toggle help popup (always allowed)
-    if (alt && vk == 'H') {
+    if (alt && key == 'H') {
         m_showHelp = !m_showHelp;
         m_helpScrollOffset = 0;
         InvalidateRect(m_hwnd, nullptr, FALSE);
@@ -865,7 +1030,7 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
     }
 
     // ESC: Close help popup if showing
-    if (vk == VK_ESCAPE && m_showHelp) {
+    if (key == VK_ESCAPE && m_showHelp) {
         m_showHelp = false;
         InvalidateRect(m_hwnd, nullptr, FALSE);
         return true;
@@ -878,12 +1043,12 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
 
     // Alt+Arrow: Move pane in direction (tree restructuring)
     // Alt+Shift+Arrow: Swap pane content with neighbor
-    if (alt && (vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT)) {
+    if (alt && (key == VK_UP || key == VK_DOWN || key == VK_LEFT || key == VK_RIGHT)) {
         if (m_paneManager.IsZoomed()) return true; // No movement in zoom mode
 
-        SplitDirection dir = (vk == VK_LEFT || vk == VK_RIGHT)
+        SplitDirection dir = (key == VK_LEFT || key == VK_RIGHT)
             ? SplitDirection::Vertical : SplitDirection::Horizontal;
-        bool forward = (vk == VK_RIGHT || vk == VK_DOWN);
+        bool forward = (key == VK_RIGHT || key == VK_DOWN);
 
         if (shift) {
             // Alt+Shift+Arrow: Swap content
@@ -904,7 +1069,7 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
     }
 
     // Ctrl+B: enter prefix mode (check FIRST, before any other logic)
-    if (m_inputMode == InputMode::Normal && ctrl && vk == 'B') {
+    if (m_inputMode == InputMode::Normal && ctrl && key == 'B') {
         EnterPrefixMode();
         m_skipNextChar = true;
         SetTimer(m_hwnd, TIMER_RESET_SKIP_FLAG, 50, nullptr);
@@ -914,21 +1079,21 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
 
     // Prefix mode: handle all commands here (bypasses IME for Korean input)
     if (m_inputMode == InputMode::Prefix) {
-        if (vk == VK_ESCAPE) {
+        if (key == VK_ESCAPE) {
             ExitPrefixMode();
             InvalidateRect(m_hwnd, nullptr, FALSE);
             return true;
         }
         // If VK_PROCESSKEY, IME is active - defer to OnChar for Korean compatibility
-        if (vk == VK_PROCESSKEY) {
+        if (key == VK_PROCESSKEY) {
             return true;
         }
 
         bool handled = true;
 
         // Arrow keys for pane navigation
-        if (vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT) {
-            switch (vk) {
+        if (key == VK_UP || key == VK_DOWN || key == VK_LEFT || key == VK_RIGHT) {
+            switch (key) {
             case VK_UP:    m_paneManager.MoveFocus(SplitDirection::Horizontal, false); break;
             case VK_DOWN:  m_paneManager.MoveFocus(SplitDirection::Horizontal, true);  break;
             case VK_LEFT:  m_paneManager.MoveFocus(SplitDirection::Vertical, false);   break;
@@ -936,16 +1101,16 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
             }
         }
         // Character commands (only in English mode - Korean deferred to OnChar)
-        else if (vk == 'V' || vk == '5') {  // v or % (both work)
+        else if (key == 'V' || key == '5') {  // v or % (both work)
             SplitActivePane(SplitDirection::Vertical);
         }
-        else if (vk == 'H' || vk == '2') {  // h or " (both work)
+        else if (key == 'H' || key == '2') {  // h or " (both work)
             SplitActivePane(SplitDirection::Horizontal);
         }
-        else if (vk == 'X') {
+        else if (key == 'X') {
             CloseActivePane();
         }
-        else if (vk == 'Z') {
+        else if (key == 'Z') {
             m_paneManager.ToggleZoom();
             if (!m_paneManager.IsZoomed()) {
                 RECT rc;
@@ -957,10 +1122,10 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
                                        m_renderer.GetCellHeight());
             }
         }
-        else if (vk == 'O') {
+        else if (key == 'O') {
             OpenSettings();
         }
-        else if (vk == 'B' && ctrl) {  // Ctrl+B: send literal 0x02
+        else if (key == 'B' && ctrl) {  // Ctrl+B: send literal 0x02
             if (auto* p = m_paneManager.GetActivePane()) {
                 p->SendInput("\x02", 1);
             }
@@ -979,43 +1144,49 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
     }
 
     // Normal mode
-    Pane* active = m_paneManager.GetActivePane();
+    IPaneSession* active = m_paneManager.GetActivePane();
     if (!active) return false;
 
     // Input will be buffered if pane is not ready
 
     // Ctrl+C: copy if selection exists, otherwise send SIGINT (0x03) via WM_CHAR
-    if (ctrl && vk == 'C' && m_hasSelection) {
+    if (ctrl && key == 'C' && m_hasSelection) {
         CopySelection();
         m_skipNextChar = true;
         SetTimer(m_hwnd, TIMER_RESET_SKIP_FLAG, 50, nullptr);
         return true;
     }
     // Ctrl+A: select all visible content in active pane
-    if (ctrl && vk == 'A') {
+    if (ctrl && key == 'A') {
         SelectAllVisible(active);
         InvalidateRect(m_hwnd, nullptr, FALSE);
         return true;
     }
     // Ctrl+V: paste (only without Shift)
-    if (ctrl && !shift && vk == 'V') {
+    if (ctrl && !shift && key == 'V') {
         PasteClipboard();
         return true;
     }
 
-    // Ctrl+Shift+H/V/X/Z/O/Arrow: direct commands (no prefix needed)
+    // Ctrl+Shift+D/H/V/X/Z/O/Arrow: direct commands (no prefix needed)
     if (ctrl && shift) {
         bool handled = false;
-        if (vk == 'H' || vk == VK_DOWN) {
+        if (key == 'H' || key == VK_DOWN) {
             SplitActivePane(SplitDirection::Horizontal);
             handled = true;
-        } else if (vk == 'V' || vk == VK_RIGHT) {
+        } else if (key == 'V' || key == VK_RIGHT) {
             SplitActivePane(SplitDirection::Vertical);
             handled = true;
-        } else if (vk == 'X') {
+        } else if (key == 'X') {
             CloseActivePane();
             handled = true;
-        } else if (vk == 'Z') {
+        } else if (key == 'D') {
+            DetachActivePaneToNewWindow();
+            handled = true;
+        } else if (key == 'R') {
+            OpenDetachablePaneWindow();
+            handled = true;
+        } else if (key == 'Z') {
             m_paneManager.ToggleZoom();
             if (!m_paneManager.IsZoomed()) {
                 RECT rc;
@@ -1027,7 +1198,7 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
                                        m_renderer.GetCellHeight());
             }
             handled = true;
-        } else if (vk == 'O') {
+        } else if (key == 'O') {
             OpenSettings();
             handled = true;
         }
@@ -1040,10 +1211,10 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
     }
 
     // Shift+Arrow: keyboard text selection (Home/End pass through to shell)
-    if (shift && (vk == VK_LEFT || vk == VK_RIGHT || vk == VK_UP || vk == VK_DOWN ||
-                  vk == VK_HOME || vk == VK_END)) {
+    if (shift && (key == VK_LEFT || key == VK_RIGHT || key == VK_UP || key == VK_DOWN ||
+                  key == VK_HOME || key == VK_END)) {
         auto& buf = active->GetBuffer();
-        Pane* pane = active;
+        IPaneSession* pane = active;
         D2D1_RECT_F paneRect = {};
         // Find pane rect
         m_paneManager.ForEachLeaf([&](SplitNode& node) {
@@ -1064,7 +1235,7 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
 
         // Extend selection end
         int maxDocumentRow = buf.GetDocumentRowCount() - 1;
-        switch (vk) {
+        switch (key) {
         case VK_LEFT:
             if (ctrl) {
                 // Skip current word class, then stop
@@ -1121,15 +1292,15 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
 
     // Any non-shift arrow key clears keyboard selection
     if (!shift && m_hasSelection && !m_selecting &&
-        (vk == VK_LEFT || vk == VK_RIGHT || vk == VK_UP || vk == VK_DOWN)) {
+        (key == VK_LEFT || key == VK_RIGHT || key == VK_UP || key == VK_DOWN)) {
         ClearSelection();
     }
 
     // Shift+PageUp/Down: scrollback navigation
-    if (shift && (vk == VK_PRIOR || vk == VK_NEXT)) {
+    if (shift && (key == VK_PRIOR || key == VK_NEXT)) {
         int pageSize = active->GetBuffer().GetRows() / 2;
         if (pageSize < 1) pageSize = 1;
-        if (vk == VK_PRIOR)
+        if (key == VK_PRIOR)
             active->GetBuffer().ScrollBack(pageSize);
         else
             active->GetBuffer().ScrollForward(pageSize);
@@ -1138,8 +1309,8 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
     }
 
     // Ctrl+Arrow: pane focus navigation
-    if (ctrl && (vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT)) {
-        switch (vk) {
+    if (ctrl && (key == VK_UP || key == VK_DOWN || key == VK_LEFT || key == VK_RIGHT)) {
+        switch (key) {
         case VK_UP:    m_paneManager.MoveFocus(SplitDirection::Horizontal, false); break;
         case VK_DOWN:  m_paneManager.MoveFocus(SplitDirection::Horizontal, true);  break;
         case VK_LEFT:  m_paneManager.MoveFocus(SplitDirection::Vertical, false);   break;
@@ -1153,7 +1324,7 @@ bool App::OnKeyDown(WPARAM vk, LPARAM /*flags*/) {
     std::string seq;
     bool appCur = active->GetBuffer().IsAppCursorKeys();
 
-    switch (vk) {
+    switch (key) {
     case VK_UP:     seq = appCur ? "\x1bOA" : "\x1b[A"; break;
     case VK_DOWN:   seq = appCur ? "\x1bOB" : "\x1b[B"; break;
     case VK_RIGHT:  seq = appCur ? "\x1bOC" : "\x1b[C"; break;
@@ -1218,7 +1389,7 @@ void App::OnChar(wchar_t ch) {
             // If there's a selection, OnKeyDown already handled copy
             // If no selection, send SIGINT without scrolling
             if (!m_hasSelection) {
-                Pane* active = m_paneManager.GetActivePane();
+                IPaneSession* active = m_paneManager.GetActivePane();
                 if (active) {
                     active->SendInput("\x03", 1);
                 }
@@ -1229,7 +1400,7 @@ void App::OnChar(wchar_t ch) {
         if (ch == 0x01) return;
         // Backspace: send DEL (0x7F) instead of BS (0x08)
         if (ch == 0x08) {
-            Pane* active = m_paneManager.GetActivePane();
+            IPaneSession* active = m_paneManager.GetActivePane();
             if (active) {
                 active->GetBuffer().ScrollToBottom();
                 active->SendInput("\x7f", 1);
@@ -1237,7 +1408,7 @@ void App::OnChar(wchar_t ch) {
             return;
         }
 
-        Pane* active = m_paneManager.GetActivePane();
+        IPaneSession* active = m_paneManager.GetActivePane();
         if (!active) return;
 
         // Input will be buffered if pane is not ready
@@ -1314,30 +1485,33 @@ void App::OnChar(wchar_t ch) {
 
 void App::OnPtyOutput(WPARAM wParam, LPARAM lParam) {
     uint32_t paneId = static_cast<uint32_t>(lParam);
-    Pane* pane = m_paneManager.FindPaneById(paneId);
+    IPaneSession* pane = m_paneManager.FindPaneById(paneId);
     if (!pane) return;
 
     if (wParam == 1) {
-        // Process exited - close this pane
+        if (m_selectPane == pane)
+            ClearSelection();
+        if (m_dragPane == pane)
+            m_dragPane = nullptr;
+        if (m_draggedPane == pane)
+            m_draggedPane = nullptr;
+        if (m_dropTargetPane == pane)
+            m_dropTargetPane = nullptr;
+        if (m_lastDblClickPane == pane)
+            m_lastDblClickPane = nullptr;
+        m_scrambledCells.erase(pane);
+
         if (!m_paneManager.ClosePaneById(paneId)) {
-            // Last pane closed
             PostMessage(m_hwnd, WM_CLOSE, 0, 0);
             return;
         }
-        RECT rc;
-        GetClientRect(m_hwnd, &rc);
-        float statusH = m_renderer.GetStatusBarHeight();
-        D2D1_RECT_F paneRect = {0, 0, static_cast<float>(rc.right),
-                                 static_cast<float>(rc.bottom) - statusH};
-        m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(),
-                               m_renderer.GetCellHeight());
+        RelayoutAfterPaneRemoval();
         InvalidateRect(m_hwnd, nullptr, FALSE);
         return;
     }
 
     pane->ProcessOutput();
 
-    // Clear scrambled cells for this pane when new output arrives
     m_scrambledCells.erase(pane);
 
     InvalidateRect(m_hwnd, nullptr, FALSE);
@@ -1365,7 +1539,7 @@ void App::OnMouseWheel(WPARAM wParam, LPARAM lParam) {
     pt.y = static_cast<int>(static_cast<short>(HIWORD(lParam)));
     ScreenToClient(m_hwnd, &pt);
 
-    Pane* pane = m_paneManager.FindPaneAtPoint(
+    IPaneSession* pane = m_paneManager.FindPaneAtPoint(
         static_cast<float>(pt.x), static_cast<float>(pt.y));
     if (!pane)
         pane = m_paneManager.GetActivePane();
@@ -1406,21 +1580,90 @@ void App::SplitActivePane(SplitDirection dir) {
                                m_renderer.GetCellHeight());
 }
 
-void App::AddPaneFromExternalRequest(const std::wstring& workingDir) {
-    if (m_paneManager.IsZoomed()) {
-        m_paneManager.ToggleZoom();
-        RelayoutPanes();
+void App::OpenDetachablePaneWindow() {
+    PaneDescriptor activeDesc = DescribeActivePane();
+    std::wstring workingDir = activeDesc.workingDirectory;
+
+    wchar_t exePath[MAX_PATH] = {};
+    if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0)
+        return;
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::wstring command = L"\"";
+    command += exePath;
+    command += L"\" --new-window";
+    if (!workingDir.empty()) {
+        command += L" --cwd ";
+        AppendQuotedArg(command, workingDir);
+    }
+    std::vector<wchar_t> cmdBuf(command.begin(), command.end());
+    cmdBuf.push_back(L'\0');
+    if (!CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE, 0,
+                        nullptr, nullptr, &si, &pi))
+        return;
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+}
+
+PaneDescriptor App::DescribeActivePane() const {
+    if (const IPaneSession* active = m_paneManager.GetActivePane())
+        return active->Describe();
+    return {};
+}
+
+static void AppendQuotedArg(std::wstring& command, const std::wstring& arg) {
+    command += L"\"";
+    for (wchar_t ch : arg) {
+        if (ch == L'"')
+            command += L'\\';
+        command += ch;
+    }
+    command += L"\"";
+}
+
+bool App::AttachExternalSession(const std::wstring& sessionId, int zone) {
+    if (sessionId.empty())
+        return false;
+
+    if (zone == 4)
+        zone = 1;
+
+    RECT rc;
+    GetClientRect(m_hwnd, &rc);
+    float statusH = m_renderer.GetStatusBarHeight();
+    float paneH = static_cast<float>(rc.bottom) - statusH;
+    D2D1_RECT_F paneRect = {0, 0, static_cast<float>(rc.right), paneH};
+    int cols = m_renderer.CalcCols(rc.right);
+    int rows = m_renderer.CalcRows(static_cast<UINT>(paneH));
+
+    uint32_t paneId = m_paneManager.AllocatePaneId();
+    auto pane = AttachPaneSession(sessionId);
+    if (!pane || !pane->Start(cols, rows, m_hwnd, WM_PTY_OUTPUT, L"", paneId))
+        return false;
+
+    if (!m_paneManager.AttachToActive(std::move(pane), m_hwnd, WM_PTY_OUTPUT,
+                                      m_renderer.GetCellWidth(),
+                                      m_renderer.GetCellHeight(),
+                                      paneId, zone)) {
+        return false;
     }
 
-    if (m_paneManager.SplitActive(SplitDirection::Vertical, m_hwnd, WM_PTY_OUTPUT,
-                                  m_renderer.GetCellWidth(),
-                                  m_renderer.GetCellHeight(),
-                                  workingDir)) {
-        RelayoutPanes();
-        ShowWindow(m_hwnd, SW_RESTORE);
-        SetForegroundWindow(m_hwnd);
-        InvalidateRect(m_hwnd, nullptr, FALSE);
-    }
+    m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(), m_renderer.GetCellHeight());
+    InvalidateRect(m_hwnd, nullptr, FALSE);
+    return true;
+}
+
+void App::RelayoutAfterPaneRemoval() {
+    RECT rc;
+    GetClientRect(m_hwnd, &rc);
+    float statusH = m_renderer.GetStatusBarHeight();
+    D2D1_RECT_F paneRect = {0, 0, static_cast<float>(rc.right),
+                             static_cast<float>(rc.bottom) - statusH};
+    m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(),
+                           m_renderer.GetCellHeight());
 }
 
 void App::CloseActivePane() {
@@ -1434,16 +1677,76 @@ void App::CloseActivePane() {
         return;
     }
 
-    RECT rc;
-    GetClientRect(m_hwnd, &rc);
-    float statusH = m_renderer.GetStatusBarHeight();
-    D2D1_RECT_F paneRect = {0, 0, static_cast<float>(rc.right),
-                             static_cast<float>(rc.bottom) - statusH};
-    m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(),
-                           m_renderer.GetCellHeight());
+    RelayoutAfterPaneRemoval();
 }
 
-bool App::HitTestScrollbar(float px, float py, Pane*& outPane, D2D1_RECT_F& outRect) {
+void App::DetachActivePaneToNewWindow() {
+    if (m_paneManager.HasSinglePane())
+        return;
+    IPaneSession* active = m_paneManager.GetActivePane();
+    if (!active)
+        return;
+    bool wasSinglePane = m_paneManager.HasSinglePane();
+
+    std::wstring sessionToken = active->GetSessionToken();
+    if (sessionToken.empty())
+        return;
+
+    wchar_t exePath[MAX_PATH] = {};
+    if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0)
+        return;
+
+    if (m_selectPane == active)
+        ClearSelection();
+    if (m_dragPane == active)
+        m_dragPane = nullptr;
+    if (m_draggedPane == active)
+        m_draggedPane = nullptr;
+    if (m_dropTargetPane == active)
+        m_dropTargetPane = nullptr;
+    if (m_lastDblClickPane == active)
+        m_lastDblClickPane = nullptr;
+    m_scrambledCells.erase(active);
+
+    active->PrepareForMove();
+    active->Stop();
+
+    std::wstring command = L"\"";
+    command += exePath;
+    command += L"\" --attach-session \"";
+    command += sessionToken;
+    command += L"\" --new-window";
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> cmdBuf(command.begin(), command.end());
+    cmdBuf.push_back(L'\0');
+    if (!CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        m_paneManager.RemoveActiveWithoutStopping();
+        if (wasSinglePane) {
+            DestroyWindow(m_hwnd);
+            return;
+        }
+        RelayoutAfterPaneRemoval();
+        return;
+    }
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    m_paneManager.RemoveActiveWithoutStopping();
+
+    if (wasSinglePane) {
+        DestroyWindow(m_hwnd);
+        return;
+    }
+
+    RelayoutAfterPaneRemoval();
+    InvalidateRect(m_hwnd, nullptr, FALSE);
+}
+
+bool App::HitTestScrollbar(float px, float py, IPaneSession*& outPane, D2D1_RECT_F& outRect) {
     if (!m_paneManager.FindPaneAndRectAtPoint(px, py, outPane, outRect))
         return false;
 
@@ -1499,7 +1802,7 @@ void App::ApplyScrollbarDrag(int mouseY) {
     buf.ScrollBack(offset);
 }
 
-void App::MouseToCell(int mx, int my, Pane* pane, D2D1_RECT_F rect, int& row, int& col) {
+void App::MouseToCell(int mx, int my, IPaneSession* pane, D2D1_RECT_F rect, int& row, int& col) {
     float cw = m_renderer.GetCellWidth();
     float ch = m_renderer.GetCellHeight();
     float padding = DxRenderer::GetPanePadding();
@@ -1569,7 +1872,7 @@ void App::OnLButtonDblClk(int x, int y) {
     }
 
     ClearSelection();
-    Pane* pane = nullptr;
+    IPaneSession* pane = nullptr;
     D2D1_RECT_F rect = {};
     if (!m_paneManager.FindPaneAndRectAtPoint(
             static_cast<float>(x), static_cast<float>(y), pane, rect))
@@ -1721,7 +2024,7 @@ void App::OnLButtonDown(int x, int y) {
     }
 
     // Scrollbar drag
-    Pane* pane = nullptr;
+    IPaneSession* pane = nullptr;
     D2D1_RECT_F rect = {};
     if (HitTestScrollbar(static_cast<float>(x), static_cast<float>(y), pane, rect)) {
         m_draggingScrollbar = true;
@@ -1743,7 +2046,7 @@ void App::OnLButtonDown(int x, int y) {
         // Activate clicked pane
         m_paneManager.SetActivePane(pane);
 
-        if (shift && !m_paneManager.HasSinglePane()) {
+        if (shift) {
             // Start pane drag
             m_draggingPane = true;
             m_draggedPane = pane;
@@ -1774,33 +2077,61 @@ void App::OnMouseMove(int x, int y) {
     m_lastMouseX = x;
     m_lastMouseY = y;
     if (m_draggingPane) {
-        // Find target pane under mouse
-        Pane* targetPane = m_paneManager.FindPaneAtPoint(static_cast<float>(x), static_cast<float>(y));
+        RECT clientRect;
+        GetClientRect(m_hwnd, &clientRect);
+        bool insideWindow = (x >= 0 && y >= 0 &&
+                             x < clientRect.right && y < clientRect.bottom);
 
-        if (targetPane && targetPane != m_draggedPane) {
-            m_dropTargetPane = targetPane;
+        POINT screenPt = {x, y};
+        ClientToScreen(m_hwnd, &screenPt);
 
-            // Find target rect
-            D2D1_RECT_F targetRect = {};
-            m_paneManager.ForEachLeaf([&](SplitNode& node) {
-                if (node.pane.get() == targetPane)
-                    targetRect = node.rect;
-            });
+        HWND newExternalTarget = nullptr;
+        if (!insideWindow) {
+            HWND targetHwnd = WindowFromPoint(screenPt);
+            if (targetHwnd && targetHwnd != m_hwnd) {
+                wchar_t className[64] = {};
+                GetClassNameW(targetHwnd, className, 64);
+                if (wcscmp(className, L"WmuxWindowClass") == 0)
+                    newExternalTarget = targetHwnd;
+            }
+        }
 
-            // Calculate drop zone (0=top, 1=right, 2=bottom, 3=left, 4=center)
-            float relX = (x - targetRect.left) / (targetRect.right - targetRect.left);
-            float relY = (y - targetRect.top) / (targetRect.bottom - targetRect.top);
+        if (m_externalDropTarget && m_externalDropTarget != newExternalTarget)
+            CancelDragPreview(m_externalDropTarget);
+        m_externalDropTarget = newExternalTarget;
 
-            // Determine which zone (edges have priority)
-            const float edgeSize = 0.25f;
-            if (relY < edgeSize) m_dropZone = 0;  // Top
-            else if (relY > 1.0f - edgeSize) m_dropZone = 2;  // Bottom
-            else if (relX < edgeSize) m_dropZone = 3;  // Left
-            else if (relX > 1.0f - edgeSize) m_dropZone = 1;  // Right
-            else m_dropZone = 4;  // Center (swap)
+        if (insideWindow) {
+            IPaneSession* targetPane = m_paneManager.FindPaneAtPoint(
+                static_cast<float>(x), static_cast<float>(y));
+
+            if (targetPane && targetPane != m_draggedPane) {
+                m_dropTargetPane = targetPane;
+
+                D2D1_RECT_F targetRect = {};
+                m_paneManager.ForEachLeaf([&](SplitNode& node) {
+                    if (node.pane.get() == targetPane)
+                        targetRect = node.rect;
+                });
+
+                float relX = (x - targetRect.left) / (targetRect.right - targetRect.left);
+                float relY = (y - targetRect.top) / (targetRect.bottom - targetRect.top);
+
+                const float edgeSize = 0.25f;
+                if (relY < edgeSize) m_dropZone = 0;
+                else if (relY > 1.0f - edgeSize) m_dropZone = 2;
+                else if (relX < edgeSize) m_dropZone = 3;
+                else if (relX > 1.0f - edgeSize) m_dropZone = 1;
+                else m_dropZone = 4;
+            } else {
+                m_dropTargetPane = nullptr;
+                m_dropZone = -1;
+            }
         } else {
             m_dropTargetPane = nullptr;
             m_dropZone = -1;
+
+            if (m_externalDropTarget)
+                SendDragPreview(m_externalDropTarget, screenPt.x, screenPt.y);
         }
         InvalidateRect(m_hwnd, nullptr, FALSE);
     } else if (m_draggingHelpScrollbar) {
@@ -1830,11 +2161,77 @@ void App::OnMouseMove(int x, int y) {
 
 void App::OnLButtonUp() {
     if (m_draggingPane) {
-        if (m_dropTargetPane && m_dropZone >= 0) {
-            // Perform the pane move/insert
+        if (m_externalDropTarget && m_draggedPane) {
+            std::wstring sessionToken = m_draggedPane->GetSessionToken();
+            if (!sessionToken.empty()) {
+                POINT screenPt = {m_lastMouseX, m_lastMouseY};
+                ClientToScreen(m_hwnd, &screenPt);
+
+                bool wasSinglePane = m_paneManager.HasSinglePane();
+
+                if (m_selectPane == m_draggedPane)
+                    ClearSelection();
+                if (m_dragPane == m_draggedPane)
+                    m_dragPane = nullptr;
+                if (m_lastDblClickPane == m_draggedPane)
+                    m_lastDblClickPane = nullptr;
+                m_scrambledCells.erase(m_draggedPane);
+
+                m_draggedPane->PrepareForMove();
+                m_draggedPane->Stop();
+
+                std::wstring payload = std::to_wstring(screenPt.x) + L","
+                    + std::to_wstring(screenPt.y) + L"\n" + sessionToken;
+                COPYDATASTRUCT copyData = {};
+                copyData.dwData = GetAttachPaneCopyDataId();
+                copyData.cbData = static_cast<DWORD>((payload.size() + 1) * sizeof(wchar_t));
+                copyData.lpData = payload.data();
+                DWORD_PTR sendResult = 0;
+                LRESULT sendOk = SendMessageTimeoutW(m_externalDropTarget, WM_COPYDATA,
+                                    reinterpret_cast<WPARAM>(m_hwnd),
+                                    reinterpret_cast<LPARAM>(&copyData),
+                                    SMTO_ABORTIFHUNG, 5000, &sendResult);
+
+                bool accepted = (sendOk != 0) && (sendResult == TRUE);
+                if (!accepted) {
+                    auto recoveredPane = AttachPaneSession(sessionToken);
+                    if (recoveredPane) {
+                        RECT rc;
+                        GetClientRect(m_hwnd, &rc);
+                        float statusH = m_renderer.GetStatusBarHeight();
+                        float paneH = static_cast<float>(rc.bottom) - statusH;
+                        int cols = m_renderer.CalcCols(rc.right);
+                        int rows = m_renderer.CalcRows(static_cast<UINT>(paneH));
+                        uint32_t paneId = m_paneManager.AllocatePaneId();
+                        if (recoveredPane->Start(cols, rows, m_hwnd, WM_PTY_OUTPUT, L"", paneId)) {
+                            m_paneManager.SetActivePane(m_draggedPane);
+                            SplitNode* activeNode = m_paneManager.GetActiveNode();
+                            if (activeNode) {
+                                activeNode->pane = std::move(recoveredPane);
+                                activeNode->paneId = paneId;
+                            }
+                        }
+                    }
+                } else {
+                    m_paneManager.RemoveActiveWithoutStopping();
+
+                    if (wasSinglePane) {
+                        m_draggingPane = false;
+                        m_draggedPane = nullptr;
+                        m_draggedNode = nullptr;
+                        m_dropTargetPane = nullptr;
+                        m_dropZone = -1;
+                        m_externalDropTarget = nullptr;
+                        ReleaseCapture();
+                        DestroyWindow(m_hwnd);
+                        return;
+                    }
+                    RelayoutAfterPaneRemoval();
+                }
+            }
+        } else if (m_dropTargetPane && m_dropZone >= 0) {
             m_paneManager.InsertPaneAt(m_draggedPane, m_dropTargetPane, m_dropZone);
 
-            // Relayout
             RECT rc;
             GetClientRect(m_hwnd, &rc);
             float statusH = m_renderer.GetStatusBarHeight();
@@ -1843,13 +2240,17 @@ void App::OnLButtonUp() {
             m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(), m_renderer.GetCellHeight());
         }
 
+        if (m_externalDropTarget)
+            CancelDragPreview(m_externalDropTarget);
         m_draggingPane = false;
         m_draggedPane = nullptr;
         m_draggedNode = nullptr;
         m_dropTargetPane = nullptr;
         m_dropZone = -1;
+        m_externalDropTarget = nullptr;
         ReleaseCapture();
         SetCursor(LoadCursor(nullptr, IDC_IBEAM));
+        InvalidateRect(m_hwnd, nullptr, FALSE);
     } else if (m_draggingHelpScrollbar) {
         m_draggingHelpScrollbar = false;
         ReleaseCapture();
@@ -1877,7 +2278,7 @@ void App::OnRButtonUp(int x, int y) {
         return;
     }
 
-    Pane* pane = nullptr;
+    IPaneSession* pane = nullptr;
     D2D1_RECT_F rect = {};
     if (m_paneManager.FindPaneAndRectAtPoint(static_cast<float>(x), static_cast<float>(y), pane, rect)) {
         m_paneManager.SetActivePane(pane);
@@ -1981,7 +2382,7 @@ void App::CopySelection() {
 }
 
 void App::PasteClipboard() {
-    Pane* active = m_paneManager.GetActivePane();
+    IPaneSession* active = m_paneManager.GetActivePane();
     if (!active) return;
 
     if (!OpenClipboard(m_hwnd)) return;

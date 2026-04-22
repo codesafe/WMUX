@@ -1,4 +1,5 @@
 #include "pane/pane_tree.h"
+#include "pane/pane_factory.h"
 #include <algorithm>
 
 bool PaneManager::Initialize(D2D1_RECT_F clientRect, HWND hwnd, UINT ptyMsg,
@@ -7,7 +8,7 @@ bool PaneManager::Initialize(D2D1_RECT_F clientRect, HWND hwnd, UINT ptyMsg,
     m_fullRect = clientRect;
     m_root = std::make_unique<SplitNode>();
     m_root->paneId = m_nextPaneId++;
-    m_root->pane = std::make_unique<Pane>();
+    m_root->pane = CreatePaneSession();
     m_root->rect = clientRect;
 
     // Account for 4px padding on each side (8px total)
@@ -24,8 +25,45 @@ bool PaneManager::Initialize(D2D1_RECT_F clientRect, HWND hwnd, UINT ptyMsg,
     return true;
 }
 
+bool PaneManager::InitializeWithSession(D2D1_RECT_F clientRect, HWND hwnd, UINT ptyMsg,
+                                        float cellWidth, float cellHeight,
+                                        std::unique_ptr<IPaneSession> session) {
+    if (!session)
+        return false;
+
+    m_fullRect = clientRect;
+    m_root = std::make_unique<SplitNode>();
+    m_root->paneId = m_nextPaneId++;
+    m_root->pane = std::move(session);
+    m_root->rect = clientRect;
+
+    constexpr float PADDING = 8.0f;
+    float availW = (clientRect.right - clientRect.left) - PADDING;
+    float availH = (clientRect.bottom - clientRect.top) - PADDING;
+    int cols = (std::max)(1, static_cast<int>(availW / cellWidth));
+    int rows = (std::max)(1, static_cast<int>(availH / cellHeight));
+
+    if (!m_root->pane->Start(cols, rows, hwnd, ptyMsg, L"", m_root->paneId))
+        return false;
+
+    m_activeNode = m_root.get();
+    return true;
+}
+
 bool PaneManager::SplitActive(SplitDirection dir, HWND hwnd, UINT ptyMsg,
                                float cellWidth, float cellHeight,
+                               const std::wstring& workingDir) {
+    auto pane = CreatePaneSession();
+    if (!pane)
+        return false;
+    return SplitActiveWithSession(dir, std::move(pane), hwnd, ptyMsg,
+                                  cellWidth, cellHeight, m_nextPaneId++, workingDir);
+}
+
+bool PaneManager::SplitActiveWithSession(SplitDirection dir, std::unique_ptr<IPaneSession> pane,
+                               HWND hwnd, UINT ptyMsg,
+                               float cellWidth, float cellHeight,
+                               uint32_t paneId,
                                const std::wstring& workingDir) {
     if (!m_activeNode || !m_activeNode->IsLeaf() || m_zoomed)
         return false;
@@ -60,8 +98,8 @@ bool PaneManager::SplitActive(SplitDirection dir, HWND hwnd, UINT ptyMsg,
 
     // Second child: new pane
     newBranch->second = std::make_unique<SplitNode>();
-    newBranch->second->paneId = m_nextPaneId++;
-    newBranch->second->pane = std::make_unique<Pane>();
+    newBranch->second->paneId = paneId;
+    newBranch->second->pane = std::move(pane);
     newBranch->second->parent = newBranch.get();
 
     // Calculate correct size for new pane before starting
@@ -84,7 +122,7 @@ bool PaneManager::SplitActive(SplitDirection dir, HWND hwnd, UINT ptyMsg,
 
     // Start new pane with correct size
     if (!newBranch->second->pane->Start(newCols, newRows, hwnd, ptyMsg, L"",
-                                         newBranch->second->paneId, workingDir)) {
+                                        newBranch->second->paneId, workingDir)) {
         // Restore old pane
         oldLeaf->pane = std::move(newBranch->first->pane);
         return false;
@@ -103,6 +141,62 @@ bool PaneManager::SplitActive(SplitDirection dir, HWND hwnd, UINT ptyMsg,
     }
 
     m_activeNode = branchPtr->second.get();
+
+    LayoutNode(m_root.get(), m_fullRect, cellWidth, cellHeight);
+    return true;
+}
+
+bool PaneManager::AttachToActive(std::unique_ptr<IPaneSession> pane, HWND /*hwnd*/, UINT /*ptyMsg*/,
+                                 float cellWidth, float cellHeight, uint32_t paneId, int zone) {
+    if (!m_activeNode || !m_activeNode->IsLeaf() || !pane)
+        return false;
+
+    if (zone == 4) {
+        m_activeNode->pane->Stop();
+        m_activeNode->pane = std::move(pane);
+        m_activeNode->paneId = paneId;
+        return true;
+    }
+
+    SplitDirection dir = (zone == 0 || zone == 2) ? SplitDirection::Horizontal : SplitDirection::Vertical;
+    bool insertFirst = (zone == 0 || zone == 3);
+    SplitNode* oldLeaf = m_activeNode;
+    D2D1_RECT_F parentRect = oldLeaf->rect;
+
+    auto newBranch = std::make_unique<SplitNode>();
+    newBranch->direction = dir;
+    newBranch->splitRatio = 0.5f;
+    newBranch->rect = parentRect;
+    newBranch->parent = oldLeaf->parent;
+
+    auto movedLeaf = std::make_unique<SplitNode>();
+    movedLeaf->pane = std::move(oldLeaf->pane);
+    movedLeaf->paneId = oldLeaf->paneId;
+    movedLeaf->parent = newBranch.get();
+
+    auto attachedLeaf = std::make_unique<SplitNode>();
+    attachedLeaf->pane = std::move(pane);
+    attachedLeaf->paneId = paneId;
+    attachedLeaf->parent = newBranch.get();
+
+    if (insertFirst) {
+        newBranch->first = std::move(attachedLeaf);
+        newBranch->second = std::move(movedLeaf);
+        m_activeNode = newBranch->first.get();
+    } else {
+        newBranch->first = std::move(movedLeaf);
+        newBranch->second = std::move(attachedLeaf);
+        m_activeNode = newBranch->second.get();
+    }
+
+    SplitNode* parent = oldLeaf->parent;
+    if (!parent) {
+        m_root = std::move(newBranch);
+    } else if (parent->first.get() == oldLeaf) {
+        parent->first = std::move(newBranch);
+    } else {
+        parent->second = std::move(newBranch);
+    }
 
     LayoutNode(m_root.get(), m_fullRect, cellWidth, cellHeight);
     return true;
@@ -143,6 +237,49 @@ bool PaneManager::CloseActive() {
     }
 
     // Focus first leaf in sibling subtree
+    m_activeNode = siblingPtr;
+    while (!m_activeNode->IsLeaf())
+        m_activeNode = m_activeNode->first.get();
+
+    return true;
+}
+
+bool PaneManager::RemoveActiveWithoutStopping() {
+    if (!m_activeNode) return false;
+
+    if (m_zoomed) {
+        m_zoomed = false;
+    }
+
+    // Release ownership without stopping - caller has already called PrepareForMove()
+    // The pane's destructor handles cleanup (pipe disconnect but not host shutdown)
+    m_activeNode->pane.reset();
+
+    SplitNode* parent = m_activeNode->parent;
+    if (!parent) {
+        m_root.reset();
+        m_activeNode = nullptr;
+        return true;
+    }
+
+    std::unique_ptr<SplitNode> sibling;
+    if (parent->first.get() == m_activeNode) {
+        sibling = std::move(parent->second);
+    } else {
+        sibling = std::move(parent->first);
+    }
+
+    sibling->parent = parent->parent;
+    SplitNode* siblingPtr = sibling.get();
+
+    if (!parent->parent) {
+        m_root = std::move(sibling);
+    } else if (parent->parent->first.get() == parent) {
+        parent->parent->first = std::move(sibling);
+    } else {
+        parent->parent->second = std::move(sibling);
+    }
+
     m_activeNode = siblingPtr;
     while (!m_activeNode->IsLeaf())
         m_activeNode = m_activeNode->first.get();
@@ -217,25 +354,29 @@ void PaneManager::LayoutNode(SplitNode* node, D2D1_RECT_F rect,
     }
 }
 
-Pane* PaneManager::FindPaneById(uint32_t id) {
+IPaneSession* PaneManager::FindPaneById(uint32_t id) {
     return FindPaneByIdRecursive(m_root.get(), id);
 }
 
-Pane* PaneManager::FindPaneByIdRecursive(SplitNode* node, uint32_t id) {
+IPaneSession* PaneManager::FindPaneByIdRecursive(SplitNode* node, uint32_t id) {
     if (!node) return nullptr;
     if (node->IsLeaf()) {
         return (node->paneId == id) ? node->pane.get() : nullptr;
     }
-    Pane* p = FindPaneByIdRecursive(node->first.get(), id);
+    IPaneSession* p = FindPaneByIdRecursive(node->first.get(), id);
     if (p) return p;
     return FindPaneByIdRecursive(node->second.get(), id);
 }
 
-Pane* PaneManager::GetActivePane() {
+IPaneSession* PaneManager::GetActivePane() {
     return m_activeNode ? m_activeNode->pane.get() : nullptr;
 }
 
-void PaneManager::SetActivePane(Pane* pane) {
+const IPaneSession* PaneManager::GetActivePane() const {
+    return m_activeNode ? m_activeNode->pane.get() : nullptr;
+}
+
+void PaneManager::SetActivePane(IPaneSession* pane) {
     if (!pane) return;
     ForEachLeaf([&](SplitNode& node) {
         if (node.pane.get() == pane) {
@@ -277,8 +418,8 @@ void PaneManager::CollectSeparatorsRecursive(SplitNode* node,
     CollectSeparatorsRecursive(node->second.get(), lines);
 }
 
-Pane* PaneManager::FindPaneAtPoint(float x, float y) {
-    Pane* result = nullptr;
+IPaneSession* PaneManager::FindPaneAtPoint(float x, float y) {
+    IPaneSession* result = nullptr;
     ForEachLeaf([&](SplitNode& node) {
         if (x >= node.rect.left && x < node.rect.right &&
             y >= node.rect.top && y < node.rect.bottom) {
@@ -289,7 +430,7 @@ Pane* PaneManager::FindPaneAtPoint(float x, float y) {
 }
 
 bool PaneManager::FindPaneAndRectAtPoint(float x, float y,
-                                          Pane*& outPane, D2D1_RECT_F& outRect) {
+                                          IPaneSession*& outPane, D2D1_RECT_F& outRect) {
     bool found = false;
     ForEachLeaf([&](SplitNode& node) {
         if (!found && x >= node.rect.left && x < node.rect.right &&
@@ -511,7 +652,7 @@ void PaneManager::MovePane(SplitDirection dir, bool forward) {
     m_activeNode = neighbor;
 }
 
-void PaneManager::InsertPaneAt(Pane* source, Pane* target, int zone) {
+void PaneManager::InsertPaneAt(IPaneSession* source, IPaneSession* target, int zone) {
     if (!source || !target || source == target) return;
 
     // Find nodes
@@ -535,7 +676,7 @@ void PaneManager::InsertPaneAt(Pane* source, Pane* target, int zone) {
 
     // Extract source pane from tree
     SplitNode* sourceParent = sourceNode->parent;
-    std::unique_ptr<Pane> extractedPane = std::move(sourceNode->pane);
+    std::unique_ptr<IPaneSession> extractedPane = std::move(sourceNode->pane);
     uint32_t extractedId = sourceNode->paneId;
 
     if (!sourceParent) {

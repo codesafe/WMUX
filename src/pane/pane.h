@@ -1,32 +1,44 @@
 #pragma once
+#include "pane/pane_session.h"
 #include "pty/conpty.h"
-#include "terminal/buffer.h"
 #include "terminal/parser.h"
 #include <string>
 #include <queue>
 #include <mutex>
 
-class Pane {
+class Pane final : public IPaneSession {
 public:
     Pane();
+    ~Pane() override = default;
 
     bool Start(int cols, int rows, HWND hwnd, UINT msg,
                const std::wstring& shell = L"", uint32_t paneId = 0,
-               const std::wstring& workingDir = L"");
-    void Stop();
-    void ProcessOutput();
-    void SendInput(const char* data, size_t len);
-    void SendInput(const std::string& data);
-    void Resize(int cols, int rows);
-    void RefreshWorkingDirectory();
+               const std::wstring& workingDir = L"") override;
+    void Stop() override;
+    void ProcessOutput() override;
+    void SendInput(const char* data, size_t len) override;
+    void SendInput(const std::string& data) override;
+    void Resize(int cols, int rows) override;
+    void RefreshWorkingDirectory() override;
 
-    TerminalBuffer& GetBuffer() { return m_buffer; }
-    const TerminalBuffer& GetBuffer() const { return m_buffer; }
+    TerminalBuffer& GetBuffer() override { return m_buffer; }
+    const TerminalBuffer& GetBuffer() const override { return m_buffer; }
     ConPty& GetPty() { return m_pty; }
-    bool IsRunning() const { return m_pty.IsRunning(); }
-    bool IsReady() const { return m_pty.IsReady(); }
-    std::wstring GetWorkingDirectory() const { return m_pty.GetWorkingDirectory(); }
-    void TryFlushPendingInput();
+    bool IsRunning() const override { return m_pty.IsRunning(); }
+    bool IsReady() const override { return m_pty.IsReady(); }
+    std::wstring GetWorkingDirectory() const override { return m_pty.GetWorkingDirectory(); }
+    void TryFlushPendingInput() override;
+    PaneDescriptor Describe() const override {
+        PaneDescriptor desc;
+        desc.cols = static_cast<uint32_t>(m_buffer.GetCols());
+        desc.rows = static_cast<uint32_t>(m_buffer.GetRows());
+        desc.workingDirectory = m_pty.GetWorkingDirectory();
+        desc.title = m_buffer.GetTitle();
+        desc.externallyDetachable = false;
+        return desc;
+    }
+    std::wstring GetSessionToken() const override { return L""; }
+    void PrepareForMove() override {}
 
 private:
     void FlushPendingInput();
