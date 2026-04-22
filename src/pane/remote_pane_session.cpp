@@ -401,8 +401,14 @@ void RemotePaneSession::ReaderThread() {
         }
     }
 
-    m_running = false;
+    bool wasRunning = m_running.exchange(false);
     m_outboundCv.notify_all();
+
+    if (wasRunning) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_notifyHwnd)
+            PostMessage(m_notifyHwnd, m_notifyMsg, 1, m_notifyLParam);
+    }
 }
 
 void RemotePaneSession::WriterThread() {

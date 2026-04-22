@@ -3,6 +3,7 @@
 #include "pane/session_protocol.h"
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <sstream>
 #include <vector>
 
@@ -112,6 +113,8 @@ private:
     static constexpr UINT WM_SEND_SNAPSHOT = WM_APP + 2;
     static constexpr UINT WM_START_RECONNECT_TIMER = WM_APP + 3;
     static constexpr UINT WM_STOP_RECONNECT_TIMER = WM_APP + 4;
+    static constexpr UINT WM_PIPE_INPUT = WM_APP + 5;
+    static constexpr UINT WM_PIPE_RESIZE = WM_APP + 6;
     static constexpr UINT TIMER_RECONNECT = 2;
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -144,6 +147,28 @@ private:
         if (msg == WM_SEND_SNAPSHOT) {
             self->m_snapshotScheduled = false;
             self->SendSnapshot();
+            return 0;
+        }
+
+        if (msg == WM_PIPE_INPUT) {
+            std::string data;
+            {
+                std::lock_guard<std::mutex> lock(self->m_pendingInputMutex);
+                if (!self->m_pendingInputQueue.empty()) {
+                    data = std::move(self->m_pendingInputQueue.front());
+                    self->m_pendingInputQueue.pop();
+                }
+            }
+            if (!data.empty())
+                self->m_pane.SendInput(data);
+            return 0;
+        }
+
+        if (msg == WM_PIPE_RESIZE) {
+            int cols = LOWORD(wParam);
+            int rows = HIWORD(wParam);
+            if (cols > 0 && rows > 0)
+                self->m_pane.Resize(cols, rows);
             return 0;
         }
 
@@ -242,12 +267,17 @@ private:
 
                 if (type == SessionProtocol::MessageType::Input) {
                     std::string data;
-                    if (SessionProtocol::ParseInputPayload(payload, data))
-                        m_pane.SendInput(data);
+                    if (SessionProtocol::ParseInputPayload(payload, data)) {
+                        {
+                            std::lock_guard<std::mutex> lock(m_pendingInputMutex);
+                            m_pendingInputQueue.push(std::move(data));
+                        }
+                        PostMessageW(m_hwnd, WM_PIPE_INPUT, 0, 0);
+                    }
                 } else if (type == SessionProtocol::MessageType::Resize) {
                     int cols = 0, rows = 0;
                     if (SessionProtocol::ParseResizePayload(payload, cols, rows))
-                        m_pane.Resize(cols, rows);
+                        PostMessageW(m_hwnd, WM_PIPE_RESIZE, MAKEWPARAM(cols, rows), 0);
                 } else if (type == SessionProtocol::MessageType::Shutdown) {
                     m_running = false;
                     PostMessageW(m_hwnd, WM_CLOSE, 0, 0);
@@ -305,6 +335,8 @@ private:
     std::mutex m_pipeMutex;
     HANDLE m_clientPipe = INVALID_HANDLE_VALUE;
     bool m_snapshotScheduled = false;
+    std::mutex m_pendingInputMutex;
+    std::queue<std::string> m_pendingInputQueue;
 };
 
 }
