@@ -2238,6 +2238,14 @@ void App::OnLButtonUp() {
             float paneH = static_cast<float>(rc.bottom) - statusH;
             D2D1_RECT_F paneRect = {0, 0, static_cast<float>(rc.right), paneH};
             m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(), m_renderer.GetCellHeight());
+        } else if (m_draggedPane) {
+            RECT clientRect;
+            GetClientRect(m_hwnd, &clientRect);
+            bool insideWindow = (m_lastMouseX >= 0 && m_lastMouseY >= 0 &&
+                                 m_lastMouseX < clientRect.right && m_lastMouseY < clientRect.bottom);
+            if (!insideWindow) {
+                DetachActivePaneToNewWindow();
+            }
         }
 
         if (m_externalDropTarget)
