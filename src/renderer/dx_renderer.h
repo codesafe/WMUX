@@ -30,20 +30,13 @@ public:
         int endDocumentRow, endCol;
         bool active;
     };
-    struct IdleEffect {
-        bool active = false;
-        uint32_t frame = 0;
-        const std::map<std::pair<int, int>, Cell>* scrambledCells = nullptr;
-    };
     struct ImeComposition {
-        bool active = false;
-        std::wstring text;
+        bool composing = false;
+        const std::wstring& compStr = L"";
     };
-
     void RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
                     bool isActive, bool isZoomed, bool scrollbarDragging = false,
                     const Selection* sel = nullptr, bool dimInactive = true,
-                    const IdleEffect* idleEffect = nullptr,
                     const ImeComposition* ime = nullptr);
     void RenderSeparator(float x1, float y1, float x2, float y2);
     void RenderStatusBar(float y, float width, const std::wstring& leftText,
@@ -53,6 +46,7 @@ public:
     void RenderPrefixOverlay(const std::wstring& text);
     void RenderHelpPopup(int scrollOffset);
     void RenderDropZone(D2D1_RECT_F rect, int zone);
+    void RenderMatrixEffect(uint32_t frame);
     void EndFrame();
 
     float GetStatusBarHeight() const { return m_cellHeight + 4.0f; }
@@ -82,6 +76,35 @@ private:
     D2D1_COLOR_F GetCellFgColor(const Cell& cell) const;
     D2D1_COLOR_F GetCellBgColor(const Cell& cell) const;
 
+    // Matrix effect state
+    struct MatrixStream {
+        int column = 0;
+        float y = 0;
+        float speed = 0;
+        int length = 0;
+        float columnBrightness = 1.0f;
+        int layer = 1;
+        bool active = true;
+        float cooldownRemaining = 0;
+        std::vector<wchar_t> chars;
+    };
+    struct ResidueCell {
+        wchar_t ch = 0;
+        float brightness = 0.0f;
+    };
+
+    void InitializeMatrixColumns();
+    void UpdateMatrixColumns();
+    void SpawnStream(int column, int layer);
+    wchar_t RandomMatrixChar();
+
+    std::vector<MatrixStream> m_matrixStreams;
+    std::vector<std::vector<ResidueCell>> m_residueGrid;
+    int m_matrixNumCols = 0;
+    int m_matrixNumRows = 0;
+    bool m_matrixInitialized = false;
+    uint32_t m_matrixRng = 12345;
+
     HWND m_hwnd = nullptr;
     UINT m_width = 0;
     UINT m_height = 0;
@@ -96,6 +119,7 @@ private:
     ComPtr<ID2D1HwndRenderTarget> m_pRenderTarget;
     ComPtr<IDWriteFactory> m_pDWriteFactory;
     ComPtr<IDWriteTextFormat> m_pTextFormat;
+    ComPtr<IDWriteTextFormat> m_pItalicTextFormat;
     ComPtr<ID2D1SolidColorBrush> m_pBrush;
 
     D2D1_COLOR_F m_defaultFg = {0.80f, 0.80f, 0.80f, 1.0f};

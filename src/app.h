@@ -65,7 +65,6 @@ private:
     void ApplyVisualSettings(const Settings& settings);
     void RegisterUserActivity();
     void UpdateIdleScrambleState();
-    void UpdateScrambledCells();
     void UpdateDragSelection(int x, int y);
     void ExpandWordSelection(IPaneSession* pane, int viewRow, int col,
                              int& startRow, int& startCol,
@@ -126,8 +125,7 @@ private:
     ULONGLONG m_lastUserInputTick = 0;
     bool m_idleScrambleActive = false;
     uint32_t m_idleScrambleFrame = 0;
-    // Store scrambled cells: pane -> (documentRow, col) -> scrambled cell
-    std::map<IPaneSession*, std::map<std::pair<int, int>, Cell>> m_scrambledCells;
+
 
     // Help popup state
     bool m_showHelp = false;

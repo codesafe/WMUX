@@ -119,6 +119,7 @@ bool DxRenderer::RecreateTextFormat() {
         return false;
 
     m_pTextFormat.Reset();
+    m_pItalicTextFormat.Reset();
     const float scaledFontSize = m_fontSize * (static_cast<float>(m_dpi) / 96.0f);
     HRESULT hr = m_pDWriteFactory->CreateTextFormat(
         m_fontName.c_str(), nullptr,
@@ -130,6 +131,18 @@ bool DxRenderer::RecreateTextFormat() {
     m_pTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     m_pTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     m_pTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+
+    hr = m_pDWriteFactory->CreateTextFormat(
+        m_fontName.c_str(), nullptr,
+        DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STYLE_ITALIC,
+        DWRITE_FONT_STRETCH_NORMAL, scaledFontSize, L"en-US",
+        m_pItalicTextFormat.GetAddressOf());
+    if (SUCCEEDED(hr)) {
+        m_pItalicTextFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        m_pItalicTextFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        m_pItalicTextFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    }
+
     return true;
 }
 
@@ -232,6 +245,7 @@ void DxRenderer::Resize(UINT width, UINT height) {
         if (FAILED(hr))
             DiscardDeviceResources();
     }
+    m_matrixInitialized = false;
 }
 
 int DxRenderer::CalcCols(UINT width) const {
@@ -299,21 +313,51 @@ void DxRenderer::Render(const TerminalBuffer& buffer) {
             // Draw underline
             if (cell.flags & CELL_UNDERLINE) {
                 m_pBrush->SetColor(fg);
-                D2D1_RECT_F ulRect = {x, y + m_cellHeight - 1, x + totalW, y + m_cellHeight};
-                m_pRenderTarget->FillRectangle(ulRect, m_pBrush.Get());
+                uint8_t ulStyle = (cell.flags2 & CELL_UL_STYLE_MASK) >> 5;
+                float ulY = y + m_cellHeight - 1;
+                if (ulStyle == UL_DOUBLE) {
+                    m_pRenderTarget->FillRectangle({x, ulY - 2, x + totalW, ulY - 1}, m_pBrush.Get());
+                    m_pRenderTarget->FillRectangle({x, ulY, x + totalW, ulY + 1}, m_pBrush.Get());
+                } else if (ulStyle == UL_CURLY) {
+                    for (float px = x; px < x + totalW; px += 2.0f) {
+                        float wave = (fmodf(px - x, 4.0f) < 2.0f) ? -1.0f : 0.0f;
+                        m_pRenderTarget->FillRectangle({px, ulY + wave, px + 1, ulY + wave + 1}, m_pBrush.Get());
+                    }
+                } else if (ulStyle == UL_DOTTED) {
+                    for (float px = x; px < x + totalW; px += 4.0f)
+                        m_pRenderTarget->FillRectangle({px, ulY, px + 2, ulY + 1}, m_pBrush.Get());
+                } else if (ulStyle == UL_DASHED) {
+                    for (float px = x; px < x + totalW; px += 6.0f)
+                        m_pRenderTarget->FillRectangle({px, ulY, px + 4, ulY + 1}, m_pBrush.Get());
+                } else {
+                    m_pRenderTarget->FillRectangle({x, ulY, x + totalW, ulY + 1}, m_pBrush.Get());
+                }
             }
 
-            // Draw character
-            if (cell.ch != L' ' && cell.ch != 0) {
+            if (cell.flags2 & CELL_STRIKETHROUGH) {
+                m_pBrush->SetColor(fg);
+                float midY = y + m_cellHeight / 2;
+                m_pRenderTarget->FillRectangle({x, midY, x + totalW, midY + 1}, m_pBrush.Get());
+            }
+
+            if (cell.flags2 & CELL_OVERLINE) {
+                m_pBrush->SetColor(fg);
+                m_pRenderTarget->FillRectangle({x, y, x + totalW, y + 1}, m_pBrush.Get());
+            }
+
+            // Draw character (skip if concealed)
+            if (!(cell.flags2 & CELL_CONCEAL) && cell.ch != L' ' && cell.ch != 0) {
                 m_pBrush->SetColor(fg);
                 D2D1_RECT_F textRect = {x, y, x + totalW, y + m_cellHeight};
+                auto* fmt = (cell.flags & CELL_ITALIC && m_pItalicTextFormat)
+                            ? m_pItalicTextFormat.Get() : m_pTextFormat.Get();
                 if (cell.ch2 != 0) {
                     wchar_t pair[2] = {cell.ch, cell.ch2};
-                    m_pRenderTarget->DrawText(pair, 2, m_pTextFormat.Get(),
+                    m_pRenderTarget->DrawText(pair, 2, fmt,
                                               textRect, m_pBrush.Get(),
                                               D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
                 } else {
-                    m_pRenderTarget->DrawText(&cell.ch, 1, m_pTextFormat.Get(),
+                    m_pRenderTarget->DrawText(&cell.ch, 1, fmt,
                                               textRect, m_pBrush.Get(),
                                               D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
                 }
@@ -327,17 +371,25 @@ void DxRenderer::Render(const TerminalBuffer& buffer) {
 }
 
 D2D1_COLOR_F DxRenderer::GetCellFgColor(const Cell& cell) const {
-    if (cell.flags & CELL_FG_DEFAULT)
-        return m_defaultFg;
-    if (cell.flags & CELL_FG_RGB) {
-        return D2D1::ColorF(
+    D2D1_COLOR_F color;
+    if (cell.flags & CELL_FG_DEFAULT) {
+        color = m_defaultFg;
+    } else if (cell.flags & CELL_FG_RGB) {
+        color = D2D1::ColorF(
             ((cell.fgRgb >> 16) & 0xFF) / 255.0f,
             ((cell.fgRgb >> 8) & 0xFF) / 255.0f,
             (cell.fgRgb & 0xFF) / 255.0f);
+    } else {
+        uint8_t idx = cell.fg;
+        if ((cell.flags & CELL_BOLD) && idx < 8) idx += 8;
+        color = m_palette[idx];
     }
-    uint8_t idx = cell.fg;
-    if ((cell.flags & CELL_BOLD) && idx < 8) idx += 8;
-    return m_palette[idx];
+    if (cell.flags2 & CELL_DIM) {
+        color.r *= 0.5f;
+        color.g *= 0.5f;
+        color.b *= 0.5f;
+    }
+    return color;
 }
 
 D2D1_COLOR_F DxRenderer::GetCellBgColor(const Cell& cell) const {
@@ -379,41 +431,12 @@ static bool CellInSelection(int documentRow, int c, const DxRenderer::Selection*
     return true;
 }
 
-static uint32_t ScrambleHash(int documentRow, int col, uint32_t frame) {
-    uint32_t value = static_cast<uint32_t>(documentRow) * 73856093u;
-    value ^= static_cast<uint32_t>(col) * 19349663u;
-    value ^= frame * 83492791u;
-    value ^= (value >> 13);
-    value *= 1274126177u;
-    return value ^ (value >> 16);
-}
 
-static bool IsScrambleCandidate(const Cell& cell) {
-    return cell.width > 0 && cell.ch != 0 && cell.ch != L' ';
-}
-
-static void ApplyIdleScrambleGlyph(int documentRow, int col, uint32_t frame, Cell& displayCell) {
-    uint32_t hash = ScrambleHash(documentRow, col, frame);
-
-    if (displayCell.width == 2) {
-        static constexpr uint32_t kHangulStart = 0xAC00;
-        static constexpr uint32_t kHangulCount = 0xD7A3 - 0xAC00 + 1;
-        displayCell.ch = static_cast<wchar_t>(kHangulStart + (hash % kHangulCount));
-    } else {
-        static constexpr wchar_t kScrambleChars[] =
-            L"@#$%&*+=?<>[]{}\\/0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        displayCell.ch = kScrambleChars[hash % (sizeof(kScrambleChars) / sizeof(kScrambleChars[0]) - 1)];
-    }
-
-    displayCell.ch2 = 0;
-    displayCell.flags &= ~CELL_INVERSE;
-}
 
 void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
-                             bool isActive, bool isZoomed, bool scrollbarDragging,
-                             const Selection* sel, bool dimInactive,
-                             const IdleEffect* idleEffect,
-                             const ImeComposition* ime) {
+                            bool isActive, bool isZoomed, bool scrollbarDragging,
+                            const Selection* sel, bool dimInactive,
+                            const ImeComposition* ime) {
     m_pRenderTarget->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
 
     // Fill pane background
@@ -436,22 +459,7 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
     bool cursorVisible = buffer.IsCursorVisible();
     int scrollOffset = buffer.GetScrollOffset();
     bool useViewAt = (scrollOffset > 0);
-    int scrambleCandidateCount = 0;
-    int scrambleTargetIndex = -1;
 
-    if (idleEffect && idleEffect->active) {
-        for (int r = 0; r < rows; r++) {
-            for (int c = 0; c < cols; c++) {
-                const Cell& cell = useViewAt ? buffer.ViewAt(r, c) : buffer.At(r, c);
-                if (IsScrambleCandidate(cell))
-                    scrambleCandidateCount++;
-            }
-        }
-        if (scrambleCandidateCount > 0) {
-            uint32_t hash = ScrambleHash(rows, cols, idleEffect->frame);
-            scrambleTargetIndex = static_cast<int>(hash % static_cast<uint32_t>(scrambleCandidateCount));
-        }
-    }
 
     // Pre-draw selection background as continuous row spans (no sub-pixel gaps)
     if (sel && sel->active) {
@@ -477,7 +485,6 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
     // Use aliased mode for crisp cell boundaries
     m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
 
-    int candidateOrdinal = 0;
     for (int r = 0; r < rows; r++) {
         // Pixel-snap: integer boundaries eliminate sub-pixel gaps
         float y  = floorf(contentRect.top + r * m_cellHeight);
@@ -505,23 +512,7 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
             Cell cell = sourceCell;
             bool scrambled = false;
 
-            // Check if this cell has a stored scrambled version
-            if (idleEffect && idleEffect->scrambledCells) {
-                auto it = idleEffect->scrambledCells->find({documentRow, c});
-                if (it != idleEffect->scrambledCells->end()) {
-                    cell = it->second;
-                    scrambled = true;
-                }
-            }
 
-            // If actively scrambling, apply new scramble to one cell per frame
-            if (!scrambled && scrambleTargetIndex >= 0 && IsScrambleCandidate(sourceCell)) {
-                if (candidateOrdinal == scrambleTargetIndex) {
-                    ApplyIdleScrambleGlyph(documentRow, c, idleEffect->frame, cell);
-                    scrambled = true;
-                }
-                candidateOrdinal++;
-            }
 
             int span = (cell.width == 2) ? 2 : 1;
             float x  = floorf(contentRect.left + c * m_cellWidth);
@@ -541,12 +532,6 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
             if (isCursor) std::swap(fg, bg);
             if (isSelected) {
                 fg = D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
-            } else if (scrambled) {
-                fg = D2D1::ColorF(
-                    0.55f + ((documentRow + c + idleEffect->frame) % 20) / 50.0f,
-                    0.78f,
-                    0.40f + ((documentRow + idleEffect->frame) % 10) / 40.0f,
-                    1.0f);
             } else if (cellIsUrl) {
                 fg = D2D1::ColorF(0.4f, 0.7f, 1.0f, 1.0f);
             }
@@ -563,10 +548,42 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
 
             if (cell.flags & CELL_UNDERLINE || cellIsUrl) {
                 m_pBrush->SetColor(fg);
-                m_pRenderTarget->FillRectangle({x, y2 - 1, x2, y2}, m_pBrush.Get());
+                uint8_t ulStyle = (cell.flags2 & CELL_UL_STYLE_MASK) >> 5;
+                float ulY = y2 - 1;
+                if (!cellIsUrl && ulStyle == UL_DOUBLE) {
+                    m_pRenderTarget->FillRectangle({x, ulY - 2, x2, ulY - 1}, m_pBrush.Get());
+                    m_pRenderTarget->FillRectangle({x, ulY, x2, ulY + 1}, m_pBrush.Get());
+                } else if (!cellIsUrl && ulStyle == UL_CURLY) {
+                    for (float px = x; px < x2; px += 2.0f) {
+                        float wave = (fmodf(px - x, 4.0f) < 2.0f) ? -1.0f : 0.0f;
+                        m_pRenderTarget->FillRectangle({px, ulY + wave, px + 1, ulY + wave + 1}, m_pBrush.Get());
+                    }
+                } else if (!cellIsUrl && ulStyle == UL_DOTTED) {
+                    for (float px = x; px < x2; px += 4.0f)
+                        m_pRenderTarget->FillRectangle({px, ulY, px + 2, ulY + 1}, m_pBrush.Get());
+                } else if (!cellIsUrl && ulStyle == UL_DASHED) {
+                    for (float px = x; px < x2; px += 6.0f)
+                        m_pRenderTarget->FillRectangle({px, ulY, px + 4, ulY + 1}, m_pBrush.Get());
+                } else {
+                    m_pRenderTarget->FillRectangle({x, ulY, x2, ulY + 1}, m_pBrush.Get());
+                }
+            }
+
+            if (cell.flags2 & CELL_STRIKETHROUGH) {
+                m_pBrush->SetColor(fg);
+                float midY = y + (y2 - y) / 2;
+                m_pRenderTarget->FillRectangle({x, midY, x2, midY + 1}, m_pBrush.Get());
+            }
+
+            if (cell.flags2 & CELL_OVERLINE) {
+                m_pBrush->SetColor(fg);
+                m_pRenderTarget->FillRectangle({x, y, x2, y + 1}, m_pBrush.Get());
             }
 
             if (cell.ch == L' ' || cell.ch == 0) continue;
+
+            // Skip drawing if concealed
+            if (cell.flags2 & CELL_CONCEAL) continue;
 
             // Block elements (U+2580-U+259F): render as geometric fills
             wchar_t ch = cell.ch;
@@ -775,13 +792,15 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
             // Regular text
             m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             m_pBrush->SetColor(fg);
+            auto* fmt = (cell.flags & CELL_ITALIC && m_pItalicTextFormat)
+                        ? m_pItalicTextFormat.Get() : m_pTextFormat.Get();
             if (cell.ch2 != 0) {
                 wchar_t pair[2] = {cell.ch, cell.ch2};
-                m_pRenderTarget->DrawText(pair, 2, m_pTextFormat.Get(),
+                m_pRenderTarget->DrawText(pair, 2, fmt,
                                           cellRect, m_pBrush.Get(),
                                           D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
             } else {
-                m_pRenderTarget->DrawText(&cell.ch, 1, m_pTextFormat.Get(),
+                m_pRenderTarget->DrawText(&cell.ch, 1, fmt,
                                           cellRect, m_pBrush.Get(),
                                           D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
             }
@@ -789,30 +808,48 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
         }
     }
 
-    // IME composition overlay at cursor position
-    if (ime && ime->active && !ime->text.empty() && !useViewAt && cursorVisible) {
+    // IME composition floating box
+    if (ime && ime->composing && !ime->compStr.empty()) {
         int imeWidth = 0;
-        for (wchar_t wc : ime->text) {
+        for (wchar_t wc : ime->compStr) {
             imeWidth += (wc >= 0x1100 && wc <= 0x115F) || (wc >= 0xAC00 && wc <= 0xD7A3) ||
                         (wc >= 0x2E80 && wc <= 0x9FFF) || (wc >= 0xF900 && wc <= 0xFAFF) ? 2 : 1;
         }
-        float ix = floorf(contentRect.left + cursorCol * m_cellWidth);
-        float iy = floorf(contentRect.top + cursorRow * m_cellHeight);
-        float iw = imeWidth * m_cellWidth;
-        D2D1_RECT_F imeRect = {ix, iy, ix + iw, iy + m_cellHeight};
 
-        m_pBrush->SetColor(m_defaultBg);
-        m_pRenderTarget->FillRectangle(imeRect, m_pBrush.Get());
+        float padH = 6.0f, padW = 10.0f;
+        float iw = imeWidth * m_cellWidth + padW * 2;
+        float ih = m_cellHeight + padH * 2;
 
+        float ix = contentRect.left + cursorCol * m_cellWidth;
+        float iy = contentRect.top + (cursorRow + 1) * m_cellHeight + 2.0f;
+
+        if (iy + ih > contentRect.bottom)
+            iy = contentRect.top + cursorRow * m_cellHeight - ih - 2.0f;
+        if (ix + iw > contentRect.right)
+            ix = contentRect.right - iw;
+        if (ix < contentRect.left)
+            ix = contentRect.left;
+        if (iy < contentRect.top)
+            iy = contentRect.top;
+
+        D2D1_RECT_F boxRect = {ix, iy, ix + iw, iy + ih};
+
+        m_pBrush->SetColor(D2D1::ColorF(0.06f, 0.06f, 0.12f, 0.95f));
+        m_pRenderTarget->FillRectangle(boxRect, m_pBrush.Get());
+
+        m_pBrush->SetColor(D2D1::ColorF(0x16C60C, 0.8f));
+        m_pRenderTarget->DrawRectangle(boxRect, m_pBrush.Get(), 1.5f);
+
+        D2D1_RECT_F textRect = {ix + padW, iy + padH, ix + iw - padW, iy + ih - padH};
         m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        m_pBrush->SetColor(m_defaultFg);
-        m_pRenderTarget->DrawText(ime->text.c_str(), static_cast<UINT32>(ime->text.size()),
-                                  m_pTextFormat.Get(), imeRect, m_pBrush.Get(),
+        m_pBrush->SetColor(D2D1::ColorF(0xE8E8E8));
+        m_pRenderTarget->DrawText(ime->compStr.c_str(), static_cast<UINT32>(ime->compStr.size()),
+                                  m_pTextFormat.Get(), textRect, m_pBrush.Get(),
                                   D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
         m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
 
-        m_pBrush->SetColor(m_defaultFg);
-        m_pRenderTarget->FillRectangle({ix, iy + m_cellHeight - 2, ix + iw, iy + m_cellHeight}, m_pBrush.Get());
+        m_pBrush->SetColor(D2D1::ColorF(0x16C60C));
+        m_pRenderTarget->FillRectangle({ix + padW, iy + ih - padH - 2, ix + iw - padW, iy + ih - padH}, m_pBrush.Get());
     }
 
     // Custom scrollbar overlay
@@ -1090,6 +1127,273 @@ void DxRenderer::RenderDropZone(D2D1_RECT_F rect, int zone) {
     m_pBrush->SetColor(D2D1::ColorF(0x16C60C, 0.8f));
     m_pRenderTarget->DrawRectangle(highlightRect, m_pBrush.Get(), 3.0f);
 }
+
+static uint32_t MatrixRand(uint32_t& state) {
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
+wchar_t DxRenderer::RandomMatrixChar() {
+    static const wchar_t pool[] =
+        L"ｦｧｨｩｪｫｬｭｮｯ"
+        L"ｰｱｲｳｴｵｶｷｸｹ"
+        L"ｺｻｼｽｾｿﾀﾁﾂﾃ"
+        L"ﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍ"
+        L"ﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗ"
+        L"ﾘﾙﾚﾛﾜﾝ"
+        L"0123456789"
+        L"ZSTNRMAHKE";
+    constexpr int poolSize = sizeof(pool) / sizeof(wchar_t) - 1;
+    return pool[MatrixRand(m_matrixRng) % poolSize];
+}
+
+void DxRenderer::SpawnStream(int column, int layer) {
+    MatrixStream s;
+    s.column = column;
+    s.layer = layer;
+    s.active = true;
+    s.cooldownRemaining = 0;
+    s.y = -(float)(MatrixRand(m_matrixRng) % 5) * m_cellHeight;
+
+    float r1 = (float)(MatrixRand(m_matrixRng) % 1000) / 1000.0f;
+    float r2 = (float)(MatrixRand(m_matrixRng) % 1000) / 1000.0f;
+    switch (layer) {
+        case 0:
+            s.speed = 0.5f + r1 * 1.0f;
+            s.length = 15 + (int)(r2 * 26);
+            s.columnBrightness = 0.3f + (float)(MatrixRand(m_matrixRng) % 1000) / 5000.0f;
+            break;
+        case 1:
+            s.speed = 1.5f + r1 * 1.5f;
+            s.length = 8 + (int)(r2 * 18);
+            s.columnBrightness = 0.5f + (float)(MatrixRand(m_matrixRng) % 1000) / 3333.0f;
+            break;
+        default:
+            s.speed = 3.0f + r1 * 3.0f;
+            s.length = 5 + (int)(r2 * 11);
+            s.columnBrightness = 0.8f + (float)(MatrixRand(m_matrixRng) % 1000) / 5000.0f;
+            break;
+    }
+
+    s.chars.resize(s.length);
+    for (int j = 0; j < s.length; ++j)
+        s.chars[j] = RandomMatrixChar();
+
+    m_matrixStreams.push_back(std::move(s));
+}
+
+void DxRenderer::RenderMatrixEffect(uint32_t /*frame*/) {
+    if (!m_matrixInitialized) {
+        InitializeMatrixColumns();
+    }
+
+    int curCols = static_cast<int>(m_width / m_cellWidth);
+    int curRows = static_cast<int>(m_height / m_cellHeight) + 2;
+    if (curCols != m_matrixNumCols || curRows != m_matrixNumRows) {
+        m_matrixInitialized = false;
+        InitializeMatrixColumns();
+    }
+
+    UpdateMatrixColumns();
+
+    m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+    // Pass 1: residue glow
+    for (int col = 0; col < m_matrixNumCols; ++col) {
+        float x = col * m_cellWidth;
+        for (int row = 0; row < m_matrixNumRows; ++row) {
+            auto& rc = m_residueGrid[col][row];
+            if (rc.brightness <= 0.0f) continue;
+            float y = row * m_cellHeight;
+            if (y > (float)m_height) break;
+
+            float glowW = m_cellWidth * 0.6f;
+            float glowH = m_cellHeight * 0.6f;
+            float cx = x + m_cellWidth * 0.5f;
+            float cy = y + m_cellHeight * 0.5f;
+            m_pBrush->SetColor({0.0f, 0.18f * rc.brightness, 0.0f, 0.5f});
+            m_pRenderTarget->FillRectangle(
+                {cx - glowW / 2, cy - glowH / 2, cx + glowW / 2, cy + glowH / 2},
+                m_pBrush.Get());
+        }
+    }
+
+    // Pass 2: streams by layer (background -> foreground)
+    for (int layerPass = 0; layerPass <= 2; ++layerPass) {
+        for (const auto& stream : m_matrixStreams) {
+            if (!stream.active || stream.layer != layerPass) continue;
+
+            float x = stream.column * m_cellWidth;
+            int charCount = static_cast<int>(stream.chars.size());
+
+            for (int i = 0; i < charCount; ++i) {
+                float charY = stream.y - i * m_cellHeight;
+                if (charY > (float)m_height) continue;
+                if (charY < -m_cellHeight) break;
+
+                float rawB = expf(-3.5f * static_cast<float>(i) / stream.length);
+                float b = rawB * stream.columnBrightness;
+                if (b < 0.02f) break;
+
+                D2D1_COLOR_F color;
+                if (i == 0) {
+                    float w = 0.6f + 0.4f * stream.columnBrightness;
+                    color = {w * 0.9f, 1.0f, w * 0.9f, 1.0f};
+                } else if (i <= 2) {
+                    float t = static_cast<float>(i) / 3.0f;
+                    float green = 0.95f * b;
+                    float rb = (1.0f - t) * 0.7f * b;
+                    color = {rb, green, rb, 1.0f};
+                } else {
+                    color = {0.0f, 0.8f * b, 0.0f, 1.0f};
+                }
+
+                D2D1_RECT_F rect = {x, charY, x + m_cellWidth, charY + m_cellHeight};
+                m_pBrush->SetColor(color);
+                m_pRenderTarget->DrawText(&stream.chars[i], 1, m_pTextFormat.Get(),
+                                          rect, m_pBrush.Get(),
+                                          D2D1_DRAW_TEXT_OPTIONS_NONE);
+            }
+        }
+    }
+}
+
+
+void DxRenderer::InitializeMatrixColumns() {
+    if (m_cellWidth <= 0 || m_cellHeight <= 0) return;
+
+    m_matrixNumCols = static_cast<int>(m_width / m_cellWidth);
+    m_matrixNumRows = static_cast<int>(m_height / m_cellHeight) + 2;
+
+    m_matrixStreams.clear();
+    m_matrixStreams.reserve(512);
+
+    m_residueGrid.assign(m_matrixNumCols, std::vector<ResidueCell>(m_matrixNumRows));
+
+    m_matrixRng = static_cast<uint32_t>(GetTickCount64() ^ 0xDEADBEEF);
+    if (m_matrixRng == 0) m_matrixRng = 1;
+
+    for (int col = 0; col < m_matrixNumCols; ++col) {
+        if (MatrixRand(m_matrixRng) % 100 < 40) {
+            uint32_t lr = MatrixRand(m_matrixRng) % 100;
+            int layer = (lr < 40) ? 0 : (lr < 75) ? 1 : 2;
+            SpawnStream(col, layer);
+            m_matrixStreams.back().y = static_cast<float>(MatrixRand(m_matrixRng) % m_height);
+        }
+    }
+
+    m_matrixInitialized = true;
+}
+
+void DxRenderer::UpdateMatrixColumns() {
+    for (size_t idx = 0; idx < m_matrixStreams.size(); ++idx) {
+        auto& stream = m_matrixStreams[idx];
+
+        if (!stream.active) {
+            stream.cooldownRemaining -= 1.0f;
+            if (stream.cooldownRemaining <= 0) {
+                int col = stream.column;
+                uint32_t lr = MatrixRand(m_matrixRng) % 100;
+                int layer = (lr < 40) ? 0 : (lr < 75) ? 1 : 2;
+
+                MatrixStream s;
+                s.column = col;
+                s.layer = layer;
+                s.active = true;
+                s.cooldownRemaining = 0;
+                s.y = -(float)(MatrixRand(m_matrixRng) % 5) * m_cellHeight;
+
+                float r1 = (float)(MatrixRand(m_matrixRng) % 1000) / 1000.0f;
+                float r2 = (float)(MatrixRand(m_matrixRng) % 1000) / 1000.0f;
+                switch (layer) {
+                    case 0:
+                        s.speed = 0.5f + r1 * 1.0f;
+                        s.length = 15 + (int)(r2 * 26);
+                        s.columnBrightness = 0.3f + (float)(MatrixRand(m_matrixRng) % 1000) / 5000.0f;
+                        break;
+                    case 1:
+                        s.speed = 1.5f + r1 * 1.5f;
+                        s.length = 8 + (int)(r2 * 18);
+                        s.columnBrightness = 0.5f + (float)(MatrixRand(m_matrixRng) % 1000) / 3333.0f;
+                        break;
+                    default:
+                        s.speed = 3.0f + r1 * 3.0f;
+                        s.length = 5 + (int)(r2 * 11);
+                        s.columnBrightness = 0.8f + (float)(MatrixRand(m_matrixRng) % 1000) / 5000.0f;
+                        break;
+                }
+                s.chars.resize(s.length);
+                for (int j = 0; j < s.length; ++j)
+                    s.chars[j] = RandomMatrixChar();
+
+                stream = std::move(s);
+            }
+            continue;
+        }
+
+        stream.y += stream.speed;
+
+        // Character mutation
+        float mutRate = (stream.layer == 0) ? 0.03f : (stream.layer == 1) ? 0.05f : 0.08f;
+        float headRate = (stream.layer == 0) ? 0.15f : (stream.layer == 1) ? 0.20f : 0.30f;
+        int charCount = static_cast<int>(stream.chars.size());
+        for (int j = 0; j < charCount; ++j) {
+            float rate = (j <= 2) ? headRate : mutRate;
+            if ((MatrixRand(m_matrixRng) % 1000) < static_cast<uint32_t>(rate * 1000))
+                stream.chars[j] = RandomMatrixChar();
+        }
+
+        // Deposit residue where the tail just left
+        float tailY = stream.y - stream.length * m_cellHeight;
+        int depositRow = static_cast<int>(tailY / m_cellHeight) - 1;
+        if (depositRow >= 0 && depositRow < m_matrixNumRows && stream.column < m_matrixNumCols) {
+            auto& rc = m_residueGrid[stream.column][depositRow];
+            rc.ch = stream.chars[(std::min)(stream.length - 1, charCount - 1)];
+            rc.brightness = 0.5f * stream.columnBrightness;
+        }
+
+        // Stream fully off screen
+        if (tailY > static_cast<float>(m_height)) {
+            stream.active = false;
+            switch (stream.layer) {
+                case 0: stream.cooldownRemaining = 60.0f + (float)(MatrixRand(m_matrixRng) % 121); break;
+                case 1: stream.cooldownRemaining = 30.0f + (float)(MatrixRand(m_matrixRng) % 61);  break;
+                default: stream.cooldownRemaining = 15.0f + (float)(MatrixRand(m_matrixRng) % 31); break;
+            }
+        }
+    }
+
+    // Spawn new streams in unoccupied columns
+    std::vector<bool> occupied(m_matrixNumCols, false);
+    for (const auto& s : m_matrixStreams)
+        if (s.active && s.column >= 0 && s.column < m_matrixNumCols)
+            occupied[s.column] = true;
+
+    for (int col = 0; col < m_matrixNumCols; ++col) {
+        if (occupied[col]) continue;
+        uint32_t r = MatrixRand(m_matrixRng) % 10000;
+        if (r < 30) SpawnStream(col, 0);
+        else if (r < 90) SpawnStream(col, 1);
+        else if (r < 130) SpawnStream(col, 2);
+    }
+
+    // Decay residue
+    for (int col = 0; col < m_matrixNumCols; ++col) {
+        for (int row = 0; row < m_matrixNumRows; ++row) {
+            auto& rc = m_residueGrid[col][row];
+            if (rc.brightness > 0.0f) {
+                rc.brightness *= 0.985f;
+                if (rc.brightness < 0.01f) {
+                    rc.brightness = 0.0f;
+                    rc.ch = 0;
+                }
+            }
+        }
+    }
+}
+
 
 void DxRenderer::InitPalette() {
     // Standard 16 colors (Windows Terminal inspired)

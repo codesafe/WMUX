@@ -381,6 +381,8 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                     m_imeCompStr.resize(bytes / sizeof(wchar_t));
                     ImmGetCompositionStringW(hImc, GCS_COMPSTR, &m_imeCompStr[0], bytes);
                     m_imeComposing = true;
+                    if (IPaneSession* ap = m_paneManager.GetActivePane())
+                        ap->GetBuffer().ScrollToBottom();
                 } else {
                     m_imeComposing = false;
                     m_imeCompStr.clear();
@@ -492,7 +494,6 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             UpdateIdleScrambleState();
             if (m_idleScrambleActive) {
                 m_idleScrambleFrame++;
-                UpdateScrambledCells();
                 InvalidateRect(m_hwnd, nullptr, FALSE);
             }
         } else if (wParam == TIMER_FLUSH_INPUT) {
@@ -655,8 +656,6 @@ void App::RegisterUserActivity() {
     m_lastUserInputTick = GetTickCount64();
     if (m_idleScrambleActive) {
         m_idleScrambleActive = false;
-        // Clear scrambled cells to restore original state
-        m_scrambledCells.clear();
         m_idleScrambleFrame = 0;
         KillTimer(m_hwnd, TIMER_IDLE_SCRAMBLE);
         InvalidateRect(m_hwnd, nullptr, FALSE);
@@ -676,86 +675,15 @@ void App::UpdateIdleScrambleState() {
     m_idleScrambleActive = shouldEnable;
     if (m_idleScrambleActive) {
         m_idleScrambleFrame = 0;
-        SetTimer(m_hwnd, TIMER_IDLE_SCRAMBLE, 120, nullptr);
+        SetTimer(m_hwnd, TIMER_IDLE_SCRAMBLE, 33, nullptr);
     } else {
         KillTimer(m_hwnd, TIMER_IDLE_SCRAMBLE);
     }
 }
 
-static bool IsScrambleCandidate(const Cell& cell) {
-    return cell.width > 0 && cell.ch != 0 && cell.ch != L' ';
-}
 
-static uint32_t ScrambleHash(int a, int b, uint32_t frame) {
-    uint32_t h = 2166136261u;
-    h = (h ^ static_cast<uint32_t>(a)) * 16777619u;
-    h = (h ^ static_cast<uint32_t>(b)) * 16777619u;
-    h = (h ^ frame) * 16777619u;
-    return h;
-}
 
-static void ApplyIdleScrambleGlyph(int documentRow, int col, uint32_t frame, Cell& displayCell) {
-    uint32_t hash = ScrambleHash(documentRow, col, frame);
 
-    if (displayCell.width == 2) {
-        static constexpr uint32_t kHangulStart = 0xAC00;
-        static constexpr uint32_t kHangulCount = 0xD7A3 - 0xAC00 + 1;
-        displayCell.ch = static_cast<wchar_t>(kHangulStart + (hash % kHangulCount));
-    } else {
-        static constexpr wchar_t kScrambleChars[] =
-            L"@#$%&*+=?<>[]{}\\/0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        displayCell.ch = kScrambleChars[hash % (sizeof(kScrambleChars) / sizeof(kScrambleChars[0]) - 1)];
-    }
-
-    displayCell.ch2 = 0;
-    displayCell.flags &= ~CELL_INVERSE;
-}
-
-void App::UpdateScrambledCells() {
-    // Update scrambled cells for each pane
-    m_paneManager.ForEachLeaf([&](SplitNode& node) {
-        auto& buffer = node.pane->GetBuffer();
-        int rows = buffer.GetRows();
-        int cols = buffer.GetCols();
-
-        // Count scramble candidates
-        int scrambleCandidateCount = 0;
-        for (int r = 0; r < rows; r++) {
-            for (int c = 0; c < cols; c++) {
-                const Cell& cell = buffer.At(r, c);
-                if (IsScrambleCandidate(cell))
-                    scrambleCandidateCount++;
-            }
-        }
-
-        if (scrambleCandidateCount == 0)
-            return;
-
-        // Select one cell to scramble this frame
-        uint32_t hash = ScrambleHash(rows, cols, m_idleScrambleFrame);
-        int scrambleTargetIndex = static_cast<int>(hash % static_cast<uint32_t>(scrambleCandidateCount));
-
-        // Find and scramble the target cell
-        int candidateOrdinal = 0;
-        for (int r = 0; r < rows; r++) {
-            int documentRow = buffer.ViewRowToDocumentRow(r);
-            for (int c = 0; c < cols; c++) {
-                const Cell& cell = buffer.At(r, c);
-                if (!IsScrambleCandidate(cell))
-                    continue;
-
-                if (candidateOrdinal == scrambleTargetIndex) {
-                    // Apply scramble and store
-                    Cell scrambledCell = cell;
-                    ApplyIdleScrambleGlyph(documentRow, c, m_idleScrambleFrame, scrambledCell);
-                    m_scrambledCells[node.pane.get()][{documentRow, c}] = scrambledCell;
-                    return;
-                }
-                candidateOrdinal++;
-            }
-        }
-    });
-}
 
 void App::UpdateSelectionAutoScroll() {
     if (!m_selecting || !m_selectPane) {
@@ -812,7 +740,9 @@ void App::OnPaint() {
     float statusH = m_renderer.GetStatusBarHeight();
     float paneAreaH = clientH - statusH;
 
-    if (m_paneManager.IsZoomed()) {
+    if (m_idleScrambleActive) {
+        m_renderer.RenderMatrixEffect(m_idleScrambleFrame);
+    } else if (m_paneManager.IsZoomed()) {
         SplitNode* node = m_paneManager.GetActiveNode();
         if (node && node->pane) {
             D2D1_RECT_F fullRect = {0, 0, clientW, paneAreaH};
@@ -827,18 +757,11 @@ void App::OnPaint() {
                 pSel = &sel;
             }
 
-            // Prepare idle effect with scrambled cells for this pane
-            DxRenderer::IdleEffect idleEffect{m_idleScrambleActive, m_idleScrambleFrame, nullptr};
-            auto it = m_scrambledCells.find(node->pane.get());
-            if (it != m_scrambledCells.end())
-                idleEffect.scrambledCells = &it->second;
-            const DxRenderer::IdleEffect* pIdleEffect = (m_idleScrambleActive || idleEffect.scrambledCells) ? &idleEffect : nullptr;
-
             DxRenderer::ImeComposition imeComp{m_imeComposing, m_imeCompStr};
             const DxRenderer::ImeComposition* pIme = m_imeComposing ? &imeComp : nullptr;
 
             m_renderer.RenderPane(node->pane->GetBuffer(), fullRect, true, true, dragging, pSel,
-                                  m_settings.dimInactivePanes, pIdleEffect, pIme);
+                                  m_settings.dimInactivePanes, pIme);
         }
     } else {
         SplitNode* activeNode = m_paneManager.GetActiveNode();
@@ -852,18 +775,11 @@ void App::OnPaint() {
                 pSel = &sel;
             }
 
-            // Prepare idle effect with scrambled cells for this pane
-            DxRenderer::IdleEffect idleEffect{m_idleScrambleActive, m_idleScrambleFrame, nullptr};
-            auto it = m_scrambledCells.find(node.pane.get());
-            if (it != m_scrambledCells.end())
-                idleEffect.scrambledCells = &it->second;
-            const DxRenderer::IdleEffect* pIdleEffect = (m_idleScrambleActive || idleEffect.scrambledCells) ? &idleEffect : nullptr;
-
             DxRenderer::ImeComposition imeComp{m_imeComposing, m_imeCompStr};
             const DxRenderer::ImeComposition* pIme = (isActive && m_imeComposing) ? &imeComp : nullptr;
 
             m_renderer.RenderPane(node.pane->GetBuffer(), node.rect, isActive, false, dragging, pSel,
-                                  m_settings.dimInactivePanes, pIdleEffect, pIme);
+                                  m_settings.dimInactivePanes, pIme);
         });
 
         std::vector<PaneManager::SeparatorLine> seps;
@@ -1499,7 +1415,7 @@ void App::OnPtyOutput(WPARAM wParam, LPARAM lParam) {
             m_dropTargetPane = nullptr;
         if (m_lastDblClickPane == pane)
             m_lastDblClickPane = nullptr;
-        m_scrambledCells.erase(pane);
+        
 
         if (!m_paneManager.ClosePaneById(paneId)) {
             PostMessage(m_hwnd, WM_CLOSE, 0, 0);
@@ -1512,7 +1428,7 @@ void App::OnPtyOutput(WPARAM wParam, LPARAM lParam) {
 
     pane->ProcessOutput();
 
-    m_scrambledCells.erase(pane);
+    
 
     InvalidateRect(m_hwnd, nullptr, FALSE);
 }
@@ -1706,7 +1622,7 @@ void App::DetachActivePaneToNewWindow() {
         m_dropTargetPane = nullptr;
     if (m_lastDblClickPane == active)
         m_lastDblClickPane = nullptr;
-    m_scrambledCells.erase(active);
+    
 
     active->PrepareForMove();
     active->Stop();
@@ -2175,7 +2091,7 @@ void App::OnLButtonUp() {
                     m_dragPane = nullptr;
                 if (m_lastDblClickPane == m_draggedPane)
                     m_lastDblClickPane = nullptr;
-                m_scrambledCells.erase(m_draggedPane);
+
 
                 m_draggedPane->PrepareForMove();
                 m_draggedPane->Stop();

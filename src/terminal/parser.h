@@ -43,11 +43,13 @@ private:
     TerminalBuffer& m_buffer;
     ParserState m_state = ParserState::Ground;
 
-    // CSI parameters
+    // CSI parameters (supports colon sub-parameters via encoding)
     std::vector<int> m_params;
+    std::vector<std::vector<int>> m_subParams; // sub-parameters per param index
     bool m_paramStarted = false;
     bool m_privateMarker = false;
     char m_intermediate = 0;
+    bool m_hasColonSubParams = false;
 
     // OSC
     std::string m_oscString;
