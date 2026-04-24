@@ -119,12 +119,14 @@
     <ClCompile Include="src\pane\remote_pane_session.cpp" />
     <ClCompile Include="src\pane\session_host.cpp" />
     <ClCompile Include="src\pane\session_protocol.cpp" />
+    <ClCompile Include="src\resume_manager.cpp" />
     <ClCompile Include="src\settings.cpp" />
     <ClCompile Include="src\settings_dialog.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\app.h" />
     <ClInclude Include="src\drop_target.h" />
+    <ClInclude Include="src\resume_manager.h" />
     <ClInclude Include="src\settings.h" />
     <ClInclude Include="src\settings_dialog.h" />
     <ClInclude Include="src\pty\conpty.h" />

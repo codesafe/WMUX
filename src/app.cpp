@@ -657,6 +657,7 @@ void App::RegisterUserActivity() {
     if (m_idleScrambleActive) {
         m_idleScrambleActive = false;
         m_idleScrambleFrame = 0;
+        m_renderer.ResetMatrixEffect();
         KillTimer(m_hwnd, TIMER_IDLE_SCRAMBLE);
         InvalidateRect(m_hwnd, nullptr, FALSE);
     }
@@ -740,9 +741,7 @@ void App::OnPaint() {
     float statusH = m_renderer.GetStatusBarHeight();
     float paneAreaH = clientH - statusH;
 
-    if (m_idleScrambleActive) {
-        m_renderer.RenderMatrixEffect(m_idleScrambleFrame);
-    } else if (m_paneManager.IsZoomed()) {
+    if (m_paneManager.IsZoomed()) {
         SplitNode* node = m_paneManager.GetActiveNode();
         if (node && node->pane) {
             D2D1_RECT_F fullRect = {0, 0, clientW, paneAreaH};
@@ -786,6 +785,11 @@ void App::OnPaint() {
         m_paneManager.CollectSeparators(seps);
         for (auto& s : seps)
             m_renderer.RenderSeparator(s.x1, s.y1, s.x2, s.y2);
+    }
+
+    // Matrix rain overlay on top of pane content
+    if (m_idleScrambleActive) {
+        m_renderer.RenderMatrixEffect(m_idleScrambleFrame);
     }
 
     if (IPaneSession* active = m_paneManager.GetActivePane()) {
@@ -896,6 +900,15 @@ void App::OnPaint() {
         m_renderer.RenderHelpPopup(m_helpScrollOffset);
     }
 
+    // Render resume prompt if showing
+    if (m_showResumePrompt) {
+        SplitNode* activeNode = m_paneManager.GetActiveNode();
+        D2D1_RECT_F promptRect = {0, 0, clientW, paneAreaH};
+        if (activeNode && !m_paneManager.IsZoomed())
+            promptRect = activeNode->rect;
+        m_renderer.RenderResumePrompt(promptRect, m_resumeAgentName, m_resumeCommand);
+    }
+
     m_renderer.EndFrame();
 }
 
@@ -954,6 +967,21 @@ bool App::OnKeyDown(WPARAM vk, LPARAM flags) {
 
     // Block all other keyboard input when help is showing
     if (m_showHelp) {
+        return true;
+    }
+
+    // Resume prompt: intercept ESC and R/N keys
+    if (m_showResumePrompt) {
+        if (key == VK_ESCAPE) {
+            HandleResumeChoice(0x1B);
+            return true;
+        }
+        if (key == 'R' || key == 'N') {
+            HandleResumeChoice(static_cast<wchar_t>(key));
+            m_skipNextChar = true;
+            SetTimer(m_hwnd, TIMER_RESET_SKIP_FLAG, 50, nullptr);
+            return true;
+        }
         return true;
     }
 
@@ -1284,6 +1312,12 @@ void App::OnChar(wchar_t ch) {
         return;
     }
 
+    // Resume prompt intercept
+    if (m_showResumePrompt) {
+        HandleResumeChoice(ch);
+        return;
+    }
+
     // Ctrl+Shift combinations are wmux commands - never send to console
     bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -1302,8 +1336,7 @@ void App::OnChar(wchar_t ch) {
         if (ch == 0x16) return;
         // Ctrl+C (0x03): handled in OnKeyDown (copy or SIGINT)
         if (ch == 0x03) {
-            // If there's a selection, OnKeyDown already handled copy
-            // If no selection, send SIGINT without scrolling
+            m_currentInputLine.clear();
             if (!m_hasSelection) {
                 IPaneSession* active = m_paneManager.GetActivePane();
                 if (active) {
@@ -1314,8 +1347,12 @@ void App::OnChar(wchar_t ch) {
         }
         // Ctrl+A (0x01): handled in OnKeyDown (select all)
         if (ch == 0x01) return;
+        // Ctrl+C clears input tracking
+        // (already handled above, but also reset tracked line)
         // Backspace: send DEL (0x7F) instead of BS (0x08)
         if (ch == 0x08) {
+            if (!m_currentInputLine.empty())
+                m_currentInputLine.pop_back();
             IPaneSession* active = m_paneManager.GetActivePane();
             if (active) {
                 active->GetBuffer().ScrollToBottom();
@@ -1327,7 +1364,31 @@ void App::OnChar(wchar_t ch) {
         IPaneSession* active = m_paneManager.GetActivePane();
         if (!active) return;
 
-        // Input will be buffered if pane is not ready
+        // Enter: check for agent launch before sending
+        if (ch == 0x0D) {
+            std::wstring agentName;
+            if (ResumeManager::DetectAgentLaunch(m_currentInputLine, agentName)) {
+                std::wstring cwd = active->GetWorkingDirectory();
+                ResumeManager::ResumeEntry entry;
+                if (!cwd.empty() && m_resumeManager.LoadResume(cwd, agentName, entry)) {
+                    m_showResumePrompt = true;
+                    m_resumeAgentName = agentName;
+                    m_resumeCommand = entry.resumeCmd;
+                    m_pendingUserCommand = m_currentInputLine;
+                    m_currentInputLine.clear();
+                    InvalidateRect(m_hwnd, nullptr, FALSE);
+                    return;
+                }
+            }
+            m_currentInputLine.clear();
+            active->GetBuffer().ScrollToBottom();
+            active->SendInput("\r", 1);
+            return;
+        }
+
+        // Track printable input
+        if (ch >= 0x20)
+            m_currentInputLine += ch;
 
         // Auto-scroll to bottom on typing (but not for control characters)
         active->GetBuffer().ScrollToBottom();
@@ -1428,7 +1489,15 @@ void App::OnPtyOutput(WPARAM wParam, LPARAM lParam) {
 
     pane->ProcessOutput();
 
-    
+    // Scan for resume commands in output
+    {
+        std::wstring agentName, resumeCmd;
+        if (ResumeManager::ScanForResumeCommand(pane->GetBuffer(), agentName, resumeCmd)) {
+            std::wstring cwd = pane->GetWorkingDirectory();
+            if (!cwd.empty())
+                m_resumeManager.SaveResume(cwd, agentName, resumeCmd);
+        }
+    }
 
     InvalidateRect(m_hwnd, nullptr, FALSE);
 }
@@ -2369,5 +2438,44 @@ void App::OnDropFolder(const std::wstring& path) {
                              static_cast<float>(rc.bottom) - statusH};
     m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(),
                            m_renderer.GetCellHeight());
+    InvalidateRect(m_hwnd, nullptr, FALSE);
+}
+
+void App::HandleResumeChoice(wchar_t choice) {
+    if (choice == 'r' || choice == 'R') {
+        IPaneSession* active = m_paneManager.GetActivePane();
+        if (active) {
+            for (size_t i = 0; i < m_pendingUserCommand.size(); i++)
+                active->SendInput("\x7f", 1);
+            char utf8[4096];
+            int len = WideCharToMultiByte(CP_UTF8, 0, m_resumeCommand.c_str(),
+                                          static_cast<int>(m_resumeCommand.size()),
+                                          utf8, sizeof(utf8), nullptr, nullptr);
+            if (len > 0)
+                active->SendInput(utf8, len);
+            active->SendInput("\r", 1);
+            std::wstring cwd = active->GetWorkingDirectory();
+            if (!cwd.empty())
+                m_resumeManager.ClearResume(cwd, m_resumeAgentName);
+        }
+    } else if (choice == 'n' || choice == 'N') {
+        IPaneSession* active = m_paneManager.GetActivePane();
+        if (active) {
+            active->GetBuffer().ScrollToBottom();
+            active->SendInput("\r", 1);
+            std::wstring cwd = active->GetWorkingDirectory();
+            if (!cwd.empty())
+                m_resumeManager.ClearResume(cwd, m_resumeAgentName);
+        }
+    } else if (choice == 0x1B) {
+        // Cancel - don't send Enter
+    } else {
+        return;
+    }
+
+    m_showResumePrompt = false;
+    m_resumeAgentName.clear();
+    m_resumeCommand.clear();
+    m_pendingUserCommand.clear();
     InvalidateRect(m_hwnd, nullptr, FALSE);
 }

@@ -820,13 +820,9 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
         float iw = imeWidth * m_cellWidth + padW * 2;
         float ih = m_cellHeight + padH * 2;
 
-        float ix = contentRect.left + cursorCol * m_cellWidth;
-        float iy = contentRect.top + (cursorRow + 1) * m_cellHeight + 2.0f;
+        float ix = contentRect.right - iw - 4.0f;
+        float iy = contentRect.bottom - ih - 4.0f;
 
-        if (iy + ih > contentRect.bottom)
-            iy = contentRect.top + cursorRow * m_cellHeight - ih - 2.0f;
-        if (ix + iw > contentRect.right)
-            ix = contentRect.right - iw;
         if (ix < contentRect.left)
             ix = contentRect.left;
         if (iy < contentRect.top)
@@ -1100,6 +1096,63 @@ void DxRenderer::RenderHelpPopup(int scrollOffset) {
     }
 }
 
+void DxRenderer::RenderResumePrompt(D2D1_RECT_F paneRect,
+                                     const std::wstring& /*agentName*/,
+                                     const std::wstring& resumeCmd) {
+    if (!m_pRenderTarget || !m_pTextFormat) return;
+
+    float popupW = 500.0f;
+    float padding = 12.0f;
+    float popupH = padding * 2 + m_cellHeight * 2 + m_cellHeight * 0.4f;
+
+    float cx = (paneRect.left + paneRect.right) / 2.0f;
+    float bottom = paneRect.bottom - 10.0f;
+
+    D2D1_RECT_F bg = {cx - popupW / 2, bottom - popupH, cx + popupW / 2, bottom};
+
+    // Clamp to pane bounds
+    if (bg.left < paneRect.left + 2) {
+        bg.left = paneRect.left + 2;
+        bg.right = bg.left + popupW;
+    }
+    if (bg.right > paneRect.right - 2) {
+        bg.right = paneRect.right - 2;
+        bg.left = bg.right - popupW;
+    }
+
+    m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+    // Background
+    m_pBrush->SetColor(D2D1::ColorF(0.10f, 0.10f, 0.18f, 0.92f));
+    m_pRenderTarget->FillRectangle(bg, m_pBrush.Get());
+
+    // Border
+    m_pBrush->SetColor(D2D1::ColorF(0.086f, 0.776f, 0.047f, 1.0f));
+    m_pRenderTarget->DrawRectangle(bg, m_pBrush.Get(), 1.5f);
+
+    // Line 1: Resume available message
+    std::wstring displayCmd = resumeCmd;
+    if (displayCmd.size() > 55)
+        displayCmd = displayCmd.substr(0, 52) + L"...";
+
+    std::wstring line1 = L"Resume: " + displayCmd;
+    D2D1_RECT_F textRect1 = {bg.left + padding, bg.top + padding,
+                              bg.right - padding, bg.top + padding + m_cellHeight};
+    m_pBrush->SetColor(D2D1::ColorF(0.95f, 0.95f, 0.95f, 1.0f));
+    m_pRenderTarget->DrawText(line1.c_str(), static_cast<UINT32>(line1.size()),
+                               m_pTextFormat.Get(), textRect1, m_pBrush.Get(),
+                               D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+    // Line 2: Options
+    std::wstring line2 = L"[R] Resume  [N] New  [ESC] Cancel";
+    D2D1_RECT_F textRect2 = {bg.left + padding, bg.top + padding + m_cellHeight + m_cellHeight * 0.4f,
+                              bg.right - padding, bg.bottom - padding};
+    m_pBrush->SetColor(D2D1::ColorF(0.65f, 0.65f, 0.65f, 1.0f));
+    m_pRenderTarget->DrawText(line2.c_str(), static_cast<UINT32>(line2.size()),
+                               m_pTextFormat.Get(), textRect2, m_pBrush.Get(),
+                               D2D1_DRAW_TEXT_OPTIONS_CLIP);
+}
+
 void DxRenderer::RenderDropZone(D2D1_RECT_F rect, int zone) {
     // zone: 0=top, 1=right, 2=bottom, 3=left, 4=center
     D2D1_RECT_F highlightRect = rect;
@@ -1186,6 +1239,7 @@ void DxRenderer::SpawnStream(int column, int layer) {
 
 void DxRenderer::RenderMatrixEffect(uint32_t /*frame*/) {
     if (!m_matrixInitialized) {
+        m_matrixOverlayOpacity = 0.0f;
         InitializeMatrixColumns();
     }
 
@@ -1197,6 +1251,14 @@ void DxRenderer::RenderMatrixEffect(uint32_t /*frame*/) {
     }
 
     UpdateMatrixColumns();
+
+    // Gradually darken the underlying content
+    if (m_matrixOverlayOpacity < 0.95f)
+        m_matrixOverlayOpacity += 0.003f;
+    m_pBrush->SetColor({0.0f, 0.0f, 0.0f, m_matrixOverlayOpacity});
+    m_pRenderTarget->FillRectangle(
+        {0, 0, static_cast<float>(m_width), static_cast<float>(m_height)},
+        m_pBrush.Get());
 
     m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
@@ -1260,6 +1322,12 @@ void DxRenderer::RenderMatrixEffect(uint32_t /*frame*/) {
     }
 }
 
+void DxRenderer::ResetMatrixEffect() {
+    m_matrixInitialized = false;
+    m_matrixOverlayOpacity = 0.0f;
+    m_matrixStreams.clear();
+    m_residueGrid.clear();
+}
 
 void DxRenderer::InitializeMatrixColumns() {
     if (m_cellWidth <= 0 || m_cellHeight <= 0) return;

@@ -47,6 +47,10 @@ public:
     void RenderHelpPopup(int scrollOffset);
     void RenderDropZone(D2D1_RECT_F rect, int zone);
     void RenderMatrixEffect(uint32_t frame);
+    void ResetMatrixEffect();
+    void RenderResumePrompt(D2D1_RECT_F paneRect,
+                            const std::wstring& agentName,
+                            const std::wstring& resumeCmd);
     void EndFrame();
 
     float GetStatusBarHeight() const { return m_cellHeight + 4.0f; }
@@ -103,6 +107,7 @@ private:
     int m_matrixNumCols = 0;
     int m_matrixNumRows = 0;
     bool m_matrixInitialized = false;
+    float m_matrixOverlayOpacity = 0.0f;
     uint32_t m_matrixRng = 12345;
 
     HWND m_hwnd = nullptr;

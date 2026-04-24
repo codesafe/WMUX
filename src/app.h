@@ -9,6 +9,7 @@
 #include "pane/pane_tree.h"
 #include "pane/pane_session.h"
 #include "settings.h"
+#include "resume_manager.h"
 
 class DropTarget;
 
@@ -154,6 +155,16 @@ private:
     static UINT GetDragPreviewMsg();
     void SendDragPreview(HWND target, int screenX, int screenY);
     void CancelDragPreview(HWND target);
+
+    // Resume prompt state
+    ResumeManager m_resumeManager;
+    bool m_showResumePrompt = false;
+    std::wstring m_resumeAgentName;
+    std::wstring m_resumeCommand;
+    std::wstring m_pendingUserCommand;
+    std::wstring m_currentInputLine;
+
+    void HandleResumeChoice(wchar_t choice);
 
     static constexpr UINT WM_PTY_OUTPUT = WM_APP + 1;
     static constexpr UINT TIMER_CLOCK = 1;
