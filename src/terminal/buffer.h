@@ -4,6 +4,7 @@
 #include <string>
 #include <cstdint>
 #include <algorithm>
+#include <bitset>
 
 enum CellFlags : uint8_t {
     CELL_BOLD       = 1 << 0,
@@ -16,15 +17,60 @@ enum CellFlags : uint8_t {
     CELL_BG_DEFAULT = 1 << 7,
 };
 
+enum CellFlags2 : uint8_t {
+    CELL_DIM           = 1 << 0,
+    CELL_STRIKETHROUGH = 1 << 1,
+    CELL_CONCEAL       = 1 << 2,
+    CELL_OVERLINE      = 1 << 3,
+    CELL_BLINK         = 1 << 4,
+    CELL_UL_STYLE_MASK = 0x07 << 5, // bits 5-7: underline style
+};
+
+enum UnderlineStyle : uint8_t {
+    UL_SINGLE = 0,
+    UL_DOUBLE = 1,
+    UL_CURLY  = 2,
+    UL_DOTTED = 3,
+    UL_DASHED = 4,
+};
+
 struct Cell {
     wchar_t ch = L' ';
     wchar_t ch2 = 0;    // surrogate pair low half (0 if unused)
     uint8_t fg = 7;
     uint8_t bg = 0;
     uint8_t flags = CELL_FG_DEFAULT | CELL_BG_DEFAULT;
+    uint8_t flags2 = 0;
     uint32_t fgRgb = 0;
     uint32_t bgRgb = 0;
     uint8_t width = 1;  // 1=normal, 2=wide char lead, 0=wide char trail
+};
+
+struct TerminalBufferSnapshot {
+    std::vector<Cell> cells;
+    int cols = 0;
+    int rows = 0;
+    int cursorRow = 0;
+    int cursorCol = 0;
+    bool wrapPending = false;
+    Cell attr;
+    int scrollTop = 0;
+    int scrollBottom = 0;
+    bool cursorVisible = true;
+    bool appCursorKeys = false;
+    bool bracketedPaste = false;
+    std::string title;
+    int savedCursorRow = 0;
+    int savedCursorCol = 0;
+    Cell savedAttr;
+    std::deque<std::vector<Cell>> scrollback;
+    int scrollOffset = 0;
+    int maxScrollback = 10000;
+    bool altScreenActive = false;
+    std::vector<Cell> savedMainBuffer;
+    int savedMainCursorRow = 0;
+    int savedMainCursorCol = 0;
+    Cell savedMainAttr;
 };
 
 class TerminalBuffer {
@@ -32,6 +78,8 @@ public:
     TerminalBuffer() = default;
     void Init(int cols, int rows);
     void Resize(int cols, int rows);
+    TerminalBufferSnapshot CreateSnapshot() const;
+    void LoadSnapshot(const TerminalBufferSnapshot& snapshot);
 
     int GetCols() const { return m_cols; }
     int GetRows() const { return m_rows; }
@@ -53,11 +101,18 @@ public:
     // Character output
     void PutChar(wchar_t ch);
     void PutCharPair(wchar_t hi, wchar_t lo);
+    void RepeatLastChar(int n);
     void LineFeed();
     void CarriageReturn();
     void Backspace();
     void Tab();
+    void TabForward(int n);
+    void TabBackward(int n);
+    void SetTabStop();
+    void ClearTabStop(int mode);
     void ReverseIndex();
+    void Index();
+    void NextLine();
 
     // Cursor movement
     void SetCursorPos(int row, int col);
@@ -104,6 +159,12 @@ public:
     void SetItalic(bool v);
     void SetUnderline(bool v);
     void SetInverse(bool v);
+    void SetDim(bool v);
+    void SetStrikethrough(bool v);
+    void SetConceal(bool v);
+    void SetOverline(bool v);
+    void SetBlink(bool v);
+    void SetUnderlineStyle(uint8_t style);
     void SetFg(uint8_t idx);
     void SetBg(uint8_t idx);
     void SetFgRgb(uint8_t r, uint8_t g, uint8_t b);
@@ -113,11 +174,17 @@ public:
 
     // Modes
     void SetMode(int mode, bool enabled);
+    bool IsAutoWrap() const { return m_autoWrap; }
+
+    // Reset
+    void FullReset();
+    void SoftReset();
 
 private:
     void ClearLine(int row);
     void ClearCell(Cell& cell);
     void ClampCursor();
+    void InitTabStops();
 
     std::vector<Cell> m_cells;
     int m_cols = 0;
@@ -127,6 +194,7 @@ private:
     bool m_wrapPending = false;
 
     Cell m_attr;  // current attribute template
+    wchar_t m_lastChar = 0;
 
     int m_scrollTop = 0;
     int m_scrollBottom = 0;
@@ -134,7 +202,12 @@ private:
     bool m_cursorVisible = true;
     bool m_appCursorKeys = false;
     bool m_bracketedPaste = false;
+    bool m_autoWrap = true;
+    bool m_originMode = false;
     std::string m_title;
+
+    // Tab stops
+    std::bitset<512> m_tabStops;
 
     // Saved cursor
     int m_savedCursorRow = 0;

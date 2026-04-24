@@ -1,5 +1,6 @@
 #pragma once
 #include "pane/pane.h"
+#include "pane/pane_session.h"
 #include <memory>
 #include <functional>
 #include <vector>
@@ -12,7 +13,7 @@ struct SplitNode {
     D2D1_RECT_F rect = {0, 0, 0, 0};
 
     // Leaf: holds a pane
-    std::unique_ptr<Pane> pane;
+    std::unique_ptr<IPaneSession> pane;
     uint32_t paneId = 0;
 
     // Branch: holds two children
@@ -36,12 +37,24 @@ public:
     bool Initialize(D2D1_RECT_F clientRect, HWND hwnd, UINT ptyMsg,
                     float cellWidth, float cellHeight,
                     const std::wstring& workingDir = L"");
+    bool InitializeWithSession(D2D1_RECT_F clientRect, HWND hwnd, UINT ptyMsg,
+                               float cellWidth, float cellHeight,
+                               std::unique_ptr<IPaneSession> session);
 
     bool SplitActive(SplitDirection dir, HWND hwnd, UINT ptyMsg,
                      float cellWidth, float cellHeight,
                      const std::wstring& workingDir = L"");
+    bool SplitActiveWithSession(SplitDirection dir, std::unique_ptr<IPaneSession> pane,
+                                HWND hwnd, UINT ptyMsg,
+                                float cellWidth, float cellHeight,
+                                uint32_t paneId,
+                                const std::wstring& workingDir = L"");
+    bool AttachToActive(std::unique_ptr<IPaneSession> pane, HWND hwnd, UINT ptyMsg,
+                        float cellWidth, float cellHeight, uint32_t paneId, int zone);
     bool CloseActive();
+    bool RemoveActiveWithoutStopping();
     bool ClosePaneById(uint32_t id);
+    uint32_t AllocatePaneId() { return m_nextPaneId++; }
 
     void MoveFocus(SplitDirection dir, bool forward);
     void ToggleZoom();
@@ -54,19 +67,21 @@ public:
     void SwapPaneContent(SplitDirection dir, bool forward);
     // Drag & Drop: Insert source pane relative to target
     // zone: 0=top, 1=right, 2=bottom, 3=left, 4=center(swap)
-    void InsertPaneAt(Pane* source, Pane* target, int zone);
+    void InsertPaneAt(IPaneSession* source, IPaneSession* target, int zone);
 
     void Relayout(D2D1_RECT_F clientRect, float cellWidth, float cellHeight);
 
-    Pane* FindPaneById(uint32_t id);
-    Pane* GetActivePane();
+    IPaneSession* FindPaneById(uint32_t id);
+    IPaneSession* GetActivePane();
+    const IPaneSession* GetActivePane() const;
     SplitNode* GetActiveNode() { return m_activeNode; }
-    void SetActivePane(Pane* pane);
+    const SplitNode* GetActiveNode() const { return m_activeNode; }
+    void SetActivePane(IPaneSession* pane);
 
     void ForEachLeaf(std::function<void(SplitNode& node)> fn);
     void CollectSeparators(std::vector<SeparatorLine>& lines);
-    Pane* FindPaneAtPoint(float x, float y);
-    bool FindPaneAndRectAtPoint(float x, float y, Pane*& outPane, D2D1_RECT_F& outRect);
+    IPaneSession* FindPaneAtPoint(float x, float y);
+    bool FindPaneAndRectAtPoint(float x, float y, IPaneSession*& outPane, D2D1_RECT_F& outRect);
 
     // Separator drag support
     SplitNode* FindSeparatorAtPoint(float x, float y);
@@ -81,7 +96,7 @@ private:
                                      std::vector<SeparatorLine>& lines);
     void ForEachLeafRecursive(SplitNode* node,
                                std::function<void(SplitNode&)>& fn);
-    Pane* FindPaneByIdRecursive(SplitNode* node, uint32_t id);
+    IPaneSession* FindPaneByIdRecursive(SplitNode* node, uint32_t id);
 
     // Helper: Find physical neighbor in screen direction
     SplitNode* FindPhysicalNeighbor(SplitNode* from, SplitDirection dir, bool forward);

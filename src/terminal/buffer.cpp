@@ -10,11 +10,121 @@ void TerminalBuffer::Init(int cols, int rows) {
     m_scrollBottom = rows - 1;
     m_wrapPending = false;
     m_attr = Cell{};
+    m_lastChar = 0;
+    m_autoWrap = true;
+    m_originMode = false;
+    InitTabStops();
+}
+
+void TerminalBuffer::InitTabStops() {
+    m_tabStops.reset();
+    for (int c = 0; c < 512; c += 8)
+        m_tabStops.set(c);
+}
+
+TerminalBufferSnapshot TerminalBuffer::CreateSnapshot() const {
+    TerminalBufferSnapshot snapshot;
+    snapshot.cells = m_cells;
+    snapshot.cols = m_cols;
+    snapshot.rows = m_rows;
+    snapshot.cursorRow = m_cursorRow;
+    snapshot.cursorCol = m_cursorCol;
+    snapshot.wrapPending = m_wrapPending;
+    snapshot.attr = m_attr;
+    snapshot.scrollTop = m_scrollTop;
+    snapshot.scrollBottom = m_scrollBottom;
+    snapshot.cursorVisible = m_cursorVisible;
+    snapshot.appCursorKeys = m_appCursorKeys;
+    snapshot.bracketedPaste = m_bracketedPaste;
+    snapshot.title = m_title;
+    snapshot.savedCursorRow = m_savedCursorRow;
+    snapshot.savedCursorCol = m_savedCursorCol;
+    snapshot.savedAttr = m_savedAttr;
+    snapshot.scrollback = m_scrollback;
+    snapshot.scrollOffset = m_scrollOffset;
+    snapshot.maxScrollback = m_maxScrollback;
+    snapshot.altScreenActive = m_altScreenActive;
+    snapshot.savedMainBuffer = m_savedMainBuffer;
+    snapshot.savedMainCursorRow = m_savedMainCursorRow;
+    snapshot.savedMainCursorCol = m_savedMainCursorCol;
+    snapshot.savedMainAttr = m_savedMainAttr;
+    return snapshot;
+}
+
+void TerminalBuffer::LoadSnapshot(const TerminalBufferSnapshot& snapshot) {
+    int savedScrollOffset = m_scrollOffset;
+    m_cells = snapshot.cells;
+    m_cols = snapshot.cols;
+    m_rows = snapshot.rows;
+    m_cursorRow = snapshot.cursorRow;
+    m_cursorCol = snapshot.cursorCol;
+    m_wrapPending = snapshot.wrapPending;
+    m_attr = snapshot.attr;
+    m_scrollTop = snapshot.scrollTop;
+    m_scrollBottom = snapshot.scrollBottom;
+    m_cursorVisible = snapshot.cursorVisible;
+    m_appCursorKeys = snapshot.appCursorKeys;
+    m_bracketedPaste = snapshot.bracketedPaste;
+    m_title = snapshot.title;
+    m_savedCursorRow = snapshot.savedCursorRow;
+    m_savedCursorCol = snapshot.savedCursorCol;
+    m_savedAttr = snapshot.savedAttr;
+    m_scrollback = snapshot.scrollback;
+    if (savedScrollOffset > 0) {
+        m_scrollOffset = (std::min)(savedScrollOffset, static_cast<int>(m_scrollback.size()));
+    } else {
+        m_scrollOffset = snapshot.scrollOffset;
+    }
+    m_maxScrollback = snapshot.maxScrollback;
+    m_altScreenActive = snapshot.altScreenActive;
+    m_savedMainBuffer = snapshot.savedMainBuffer;
+    m_savedMainCursorRow = snapshot.savedMainCursorRow;
+    m_savedMainCursorCol = snapshot.savedMainCursorCol;
+    m_savedMainAttr = snapshot.savedMainAttr;
 }
 
 void TerminalBuffer::Resize(int newCols, int newRows) {
     if (newCols == m_cols && newRows == m_rows)
         return;
+
+    if (newRows < m_rows && !m_altScreenActive) {
+        int lastContentRow = m_rows - 1;
+        while (lastContentRow > m_cursorRow) {
+            bool empty = true;
+            for (int c = 0; c < m_cols; c++) {
+                const Cell& cell = At(lastContentRow, c);
+                if (cell.ch != L' ' && cell.ch != 0 && cell.width > 0) {
+                    empty = false;
+                    break;
+                }
+            }
+            if (!empty) break;
+            lastContentRow--;
+        }
+
+        int contentRows = lastContentRow + 1;
+        int excessRows = contentRows - newRows;
+        if (excessRows > 0) {
+            for (int r = 0; r < excessRows; r++) {
+                std::vector<Cell> line(m_cols);
+                for (int c = 0; c < m_cols; c++)
+                    line[c] = At(r, c);
+                m_scrollback.push_back(std::move(line));
+                if (static_cast<int>(m_scrollback.size()) > m_maxScrollback)
+                    m_scrollback.pop_front();
+            }
+
+            for (int r = 0; r < m_rows - excessRows; r++) {
+                for (int c = 0; c < m_cols; c++)
+                    At(r, c) = At(r + excessRows, c);
+            }
+
+            m_cursorRow -= excessRows;
+            if (m_cursorRow < 0) m_cursorRow = 0;
+            m_savedCursorRow -= excessRows;
+            if (m_savedCursorRow < 0) m_savedCursorRow = 0;
+        }
+    }
 
     std::vector<Cell> newCells(static_cast<size_t>(newCols) * newRows, Cell{});
     int copyRows = (std::min)(m_rows, newRows);
@@ -70,16 +180,20 @@ void TerminalBuffer::PutChar(wchar_t ch) {
     int w = CharWidth(ch);
 
     if (m_wrapPending) {
-        m_cursorCol = 0;
-        LineFeed();
+        if (m_autoWrap) {
+            m_cursorCol = 0;
+            LineFeed();
+        }
         m_wrapPending = false;
     }
 
     // Wide char doesn't fit at last column: pad with space and wrap
     if (w == 2 && m_cursorCol >= m_cols - 1) {
         ClearCell(At(m_cursorRow, m_cursorCol));
-        m_cursorCol = 0;
-        LineFeed();
+        if (m_autoWrap) {
+            m_cursorCol = 0;
+            LineFeed();
+        }
     }
 
     // Overwriting the trailing half of an existing wide char: clear lead
@@ -107,6 +221,7 @@ void TerminalBuffer::PutChar(wchar_t ch) {
     cell.fg = m_attr.fg;
     cell.bg = m_attr.bg;
     cell.flags = m_attr.flags;
+    cell.flags2 = m_attr.flags2;
     cell.fgRgb = m_attr.fgRgb;
     cell.bgRgb = m_attr.bgRgb;
     cell.width = static_cast<uint8_t>(w);
@@ -118,10 +233,13 @@ void TerminalBuffer::PutChar(wchar_t ch) {
         trail.fg = m_attr.fg;
         trail.bg = m_attr.bg;
         trail.flags = m_attr.flags;
+        trail.flags2 = m_attr.flags2;
         trail.fgRgb = m_attr.fgRgb;
         trail.bgRgb = m_attr.bgRgb;
         trail.width = 0;
     }
+
+    m_lastChar = ch;
 
     // Advance cursor
     if (m_cursorCol + w < m_cols) {
@@ -134,15 +252,19 @@ void TerminalBuffer::PutChar(wchar_t ch) {
 void TerminalBuffer::PutCharPair(wchar_t hi, wchar_t lo) {
     // Supplementary Unicode character (surrogate pair) - always width 2
     if (m_wrapPending) {
-        m_cursorCol = 0;
-        LineFeed();
+        if (m_autoWrap) {
+            m_cursorCol = 0;
+            LineFeed();
+        }
         m_wrapPending = false;
     }
 
     if (m_cursorCol >= m_cols - 1) {
         ClearCell(At(m_cursorRow, m_cursorCol));
-        m_cursorCol = 0;
-        LineFeed();
+        if (m_autoWrap) {
+            m_cursorCol = 0;
+            LineFeed();
+        }
     }
 
     if (m_cursorCol > 0 && At(m_cursorRow, m_cursorCol).width == 0)
@@ -161,6 +283,7 @@ void TerminalBuffer::PutCharPair(wchar_t hi, wchar_t lo) {
     cell.fg = m_attr.fg;
     cell.bg = m_attr.bg;
     cell.flags = m_attr.flags;
+    cell.flags2 = m_attr.flags2;
     cell.fgRgb = m_attr.fgRgb;
     cell.bgRgb = m_attr.bgRgb;
     cell.width = 2;
@@ -172,15 +295,24 @@ void TerminalBuffer::PutCharPair(wchar_t hi, wchar_t lo) {
         trail.fg = m_attr.fg;
         trail.bg = m_attr.bg;
         trail.flags = m_attr.flags;
+        trail.flags2 = m_attr.flags2;
         trail.fgRgb = m_attr.fgRgb;
         trail.bgRgb = m_attr.bgRgb;
         trail.width = 0;
     }
 
+    m_lastChar = 0;
+
     if (m_cursorCol + 2 < m_cols)
         m_cursorCol += 2;
     else
         m_wrapPending = true;
+}
+
+void TerminalBuffer::RepeatLastChar(int n) {
+    if (m_lastChar == 0) return;
+    for (int i = 0; i < n; i++)
+        PutChar(m_lastChar);
 }
 
 void TerminalBuffer::LineFeed() {
@@ -204,9 +336,49 @@ void TerminalBuffer::Backspace() {
 }
 
 void TerminalBuffer::Tab() {
-    int nextTab = ((m_cursorCol / 8) + 1) * 8;
-    m_cursorCol = (std::min)(nextTab, m_cols - 1);
+    for (int c = m_cursorCol + 1; c < m_cols; c++) {
+        if (m_tabStops.test(c)) {
+            m_cursorCol = c;
+            m_wrapPending = false;
+            return;
+        }
+    }
+    m_cursorCol = m_cols - 1;
     m_wrapPending = false;
+}
+
+void TerminalBuffer::TabForward(int n) {
+    for (int i = 0; i < n; i++)
+        Tab();
+}
+
+void TerminalBuffer::TabBackward(int n) {
+    for (int i = 0; i < n; i++) {
+        for (int c = m_cursorCol - 1; c >= 0; c--) {
+            if (m_tabStops.test(c)) {
+                m_cursorCol = c;
+                break;
+            }
+            if (c == 0) {
+                m_cursorCol = 0;
+            }
+        }
+    }
+    m_wrapPending = false;
+}
+
+void TerminalBuffer::SetTabStop() {
+    if (m_cursorCol < 512)
+        m_tabStops.set(m_cursorCol);
+}
+
+void TerminalBuffer::ClearTabStop(int mode) {
+    if (mode == 0) {
+        if (m_cursorCol < 512)
+            m_tabStops.reset(m_cursorCol);
+    } else if (mode == 3) {
+        m_tabStops.reset();
+    }
 }
 
 void TerminalBuffer::ReverseIndex() {
@@ -217,8 +389,23 @@ void TerminalBuffer::ReverseIndex() {
     }
 }
 
+void TerminalBuffer::Index() {
+    LineFeed();
+}
+
+void TerminalBuffer::NextLine() {
+    CarriageReturn();
+    LineFeed();
+}
+
 void TerminalBuffer::SetCursorPos(int row, int col) {
-    m_cursorRow = (std::max)(0, (std::min)(row, m_rows - 1));
+    if (m_originMode) {
+        row += m_scrollTop;
+        row = (std::max)(m_scrollTop, (std::min)(row, m_scrollBottom));
+    } else {
+        row = (std::max)(0, (std::min)(row, m_rows - 1));
+    }
+    m_cursorRow = row;
     m_cursorCol = (std::max)(0, (std::min)(col, m_cols - 1));
     m_wrapPending = false;
 }
@@ -249,7 +436,12 @@ void TerminalBuffer::SetCursorCol(int col) {
 }
 
 void TerminalBuffer::SetCursorRow(int row) {
-    m_cursorRow = (std::max)(0, (std::min)(row, m_rows - 1));
+    if (m_originMode) {
+        row += m_scrollTop;
+        m_cursorRow = (std::max)(m_scrollTop, (std::min)(row, m_scrollBottom));
+    } else {
+        m_cursorRow = (std::max)(0, (std::min)(row, m_rows - 1));
+    }
     m_wrapPending = false;
 }
 
@@ -361,8 +553,13 @@ void TerminalBuffer::ScrollUp(int n) {
             for (int c = 0; c < m_cols; c++)
                 line[c] = At(0, c);
             m_scrollback.push_back(std::move(line));
-            if (static_cast<int>(m_scrollback.size()) > m_maxScrollback)
+            if (m_scrollOffset > 0)
+                m_scrollOffset++;
+            if (static_cast<int>(m_scrollback.size()) > m_maxScrollback) {
                 m_scrollback.pop_front();
+                if (m_scrollOffset > 0)
+                    m_scrollOffset--;
+            }
         }
 
         for (int r = m_scrollTop; r < m_scrollBottom; r++) {
@@ -405,12 +602,46 @@ void TerminalBuffer::SetItalic(bool v) {
 
 void TerminalBuffer::SetUnderline(bool v) {
     if (v) m_attr.flags |= CELL_UNDERLINE;
-    else   m_attr.flags &= ~CELL_UNDERLINE;
+    else {
+        m_attr.flags &= ~CELL_UNDERLINE;
+        m_attr.flags2 &= ~CELL_UL_STYLE_MASK;
+    }
 }
 
 void TerminalBuffer::SetInverse(bool v) {
     if (v) m_attr.flags |= CELL_INVERSE;
     else   m_attr.flags &= ~CELL_INVERSE;
+}
+
+void TerminalBuffer::SetDim(bool v) {
+    if (v) m_attr.flags2 |= CELL_DIM;
+    else   m_attr.flags2 &= ~CELL_DIM;
+}
+
+void TerminalBuffer::SetStrikethrough(bool v) {
+    if (v) m_attr.flags2 |= CELL_STRIKETHROUGH;
+    else   m_attr.flags2 &= ~CELL_STRIKETHROUGH;
+}
+
+void TerminalBuffer::SetConceal(bool v) {
+    if (v) m_attr.flags2 |= CELL_CONCEAL;
+    else   m_attr.flags2 &= ~CELL_CONCEAL;
+}
+
+void TerminalBuffer::SetOverline(bool v) {
+    if (v) m_attr.flags2 |= CELL_OVERLINE;
+    else   m_attr.flags2 &= ~CELL_OVERLINE;
+}
+
+void TerminalBuffer::SetBlink(bool v) {
+    if (v) m_attr.flags2 |= CELL_BLINK;
+    else   m_attr.flags2 &= ~CELL_BLINK;
+}
+
+void TerminalBuffer::SetUnderlineStyle(uint8_t style) {
+    m_attr.flags |= CELL_UNDERLINE;
+    m_attr.flags2 = (m_attr.flags2 & ~CELL_UL_STYLE_MASK) |
+                    ((style & 0x07) << 5);
 }
 
 void TerminalBuffer::SetFg(uint8_t idx) {
@@ -452,8 +683,31 @@ void TerminalBuffer::SetMode(int mode, bool enabled) {
     case 1:
         m_appCursorKeys = enabled;
         break;
+    case 6:
+        m_originMode = enabled;
+        if (enabled)
+            SetCursorPos(0, 0);
+        break;
+    case 7:
+        m_autoWrap = enabled;
+        break;
     case 25:
         m_cursorVisible = enabled;
+        break;
+    case 1047:
+        if (enabled && !m_altScreenActive) {
+            m_savedMainBuffer = m_cells;
+            m_cells.assign(static_cast<size_t>(m_cols) * m_rows, Cell{});
+            m_altScreenActive = true;
+        } else if (!enabled && m_altScreenActive) {
+            m_cells = m_savedMainBuffer;
+            m_altScreenActive = false;
+            ClampCursor();
+        }
+        break;
+    case 1048:
+        if (enabled) SaveCursor();
+        else RestoreCursor();
         break;
     case 1049:
         if (enabled && !m_altScreenActive) {
@@ -477,7 +731,50 @@ void TerminalBuffer::SetMode(int mode, bool enabled) {
     case 2004:
         m_bracketedPaste = enabled;
         break;
+    case 2026:
+        // Synchronized output: accepted silently
+        break;
     }
+}
+
+void TerminalBuffer::FullReset() {
+    m_cursorRow = 0;
+    m_cursorCol = 0;
+    m_wrapPending = false;
+    m_attr = Cell{};
+    m_lastChar = 0;
+    m_scrollTop = 0;
+    m_scrollBottom = m_rows - 1;
+    m_cursorVisible = true;
+    m_appCursorKeys = false;
+    m_bracketedPaste = false;
+    m_autoWrap = true;
+    m_originMode = false;
+    m_savedCursorRow = 0;
+    m_savedCursorCol = 0;
+    m_savedAttr = Cell{};
+    m_altScreenActive = false;
+    m_savedMainBuffer.clear();
+    m_scrollback.clear();
+    m_scrollOffset = 0;
+    InitTabStops();
+    for (int r = 0; r < m_rows; r++)
+        ClearLine(r);
+}
+
+void TerminalBuffer::SoftReset() {
+    m_cursorVisible = true;
+    m_originMode = false;
+    m_autoWrap = true;
+    m_appCursorKeys = false;
+    m_bracketedPaste = false;
+    m_scrollTop = 0;
+    m_scrollBottom = m_rows - 1;
+    m_attr = Cell{};
+    m_savedCursorRow = 0;
+    m_savedCursorCol = 0;
+    m_savedAttr = Cell{};
+    InitTabStops();
 }
 
 void TerminalBuffer::ClearLine(int row) {
