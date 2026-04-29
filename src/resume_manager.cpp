@@ -2,6 +2,7 @@
 #include "terminal/buffer.h"
 #include <algorithm>
 #include <cctype>
+#include <vector>
 
 namespace {
 
@@ -13,6 +14,23 @@ std::wstring BufferRowText(const TerminalBuffer& buffer, int row) {
     text.reserve(cols);
     for (int c = 0; c < cols; c++) {
         const Cell& cell = buffer.At(row, c);
+        if (cell.width == 0)
+            continue;
+        text += (cell.ch == 0) ? L' ' : cell.ch;
+        if (cell.ch2 != 0)
+            text += cell.ch2;
+    }
+    return text;
+}
+
+std::wstring DocumentRowText(const TerminalBuffer& buffer, int row) {
+    std::wstring text;
+    if (row < 0 || row >= buffer.GetDocumentRowCount())
+        return text;
+    int cols = buffer.GetCols();
+    text.reserve(cols);
+    for (int c = 0; c < cols; c++) {
+        const Cell& cell = buffer.CellAtDocumentRow(row, c);
         if (cell.width == 0)
             continue;
         text += (cell.ch == 0) ? L' ' : cell.ch;
@@ -65,6 +83,24 @@ void ResumeManager::SaveResume(const std::wstring& dir, const std::wstring& agen
                                 const std::wstring& resumeCmd) {
     std::wstring path = GetResumeIniPath();
     std::wstring section = NormalizeDir(dir);
+
+    std::vector<wchar_t> sections(32768);
+    DWORD sectionChars = GetPrivateProfileSectionNamesW(
+        sections.data(), static_cast<DWORD>(sections.size()), path.c_str());
+    for (wchar_t* current = sections.data();
+         sectionChars > 0 && *current != L'\0';
+         current += wcslen(current) + 1) {
+        std::wstring existingSection = current;
+        if (ToLowerW(existingSection) == section)
+            continue;
+
+        wchar_t existingCmd[1024] = {};
+        GetPrivateProfileStringW(existingSection.c_str(), agentName.c_str(), L"",
+                                 existingCmd, 1024, path.c_str());
+        if (resumeCmd == existingCmd)
+            return;
+    }
+
     WritePrivateProfileStringW(section.c_str(), agentName.c_str(),
                                resumeCmd.c_str(), path.c_str());
 }
@@ -129,12 +165,13 @@ std::wstring StripDecoration(const std::wstring& s) {
 bool ResumeManager::ScanForResumeCommand(const TerminalBuffer& buffer,
                                           std::wstring& agentName,
                                           std::wstring& resumeCmd) {
-    int cursorRow = buffer.GetCursorRow();
-    int startRow = (std::max)(0, cursorRow - 10);
-    int endRow = (std::min)(buffer.GetRows() - 1, cursorRow);
+    int endRow = buffer.ViewRowToDocumentRow(buffer.GetCursorRow());
+    int startRow = (std::max)(0, endRow - 200);
 
     for (int row = endRow; row >= startRow; row--) {
-        std::wstring rawLine = BufferRowText(buffer, row);
+        std::wstring rawLine = DocumentRowText(buffer, row);
+        if (rawLine.empty() && row < buffer.GetRows())
+            rawLine = BufferRowText(buffer, row);
         std::wstring line = StripDecoration(rawLine);
         std::wstring lower = ToLowerW(line);
 
@@ -194,10 +231,32 @@ bool ResumeManager::DetectAgentLaunch(const std::wstring& commandLine,
         lower.find(L" resume ") != std::wstring::npos)
         return false;
 
-    // Extract first token
+    return DetectAgentCommand(trimmed, agentName);
+}
+
+bool ResumeManager::DetectAgentCommand(const std::wstring& commandLine,
+                                       std::wstring& agentName) {
+    std::wstring trimmed = TrimW(commandLine);
+    if (trimmed.empty())
+        return false;
+
     size_t spacePos = trimmed.find(L' ');
     std::wstring firstToken = (spacePos != std::wstring::npos)
-        ? ToLowerW(trimmed.substr(0, spacePos)) : ToLowerW(trimmed);
+        ? trimmed.substr(0, spacePos) : trimmed;
+    firstToken = ToLowerW(firstToken);
+
+    if (firstToken.size() >= 2 &&
+        ((firstToken.front() == L'"' && firstToken.back() == L'"') ||
+         (firstToken.front() == L'\'' && firstToken.back() == L'\''))) {
+        firstToken = firstToken.substr(1, firstToken.size() - 2);
+    }
+
+    size_t slashPos = firstToken.find_last_of(L"\\/");
+    if (slashPos != std::wstring::npos)
+        firstToken = firstToken.substr(slashPos + 1);
+
+    if (firstToken.size() > 4 && firstToken.substr(firstToken.size() - 4) == L".exe")
+        firstToken.resize(firstToken.size() - 4);
 
     for (int i = 0; i < kAgentCount; i++) {
         if (firstToken == kAgentNames[i]) {

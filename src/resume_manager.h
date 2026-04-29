@@ -27,6 +27,8 @@ public:
 
     static bool DetectAgentLaunch(const std::wstring& commandLine,
                                   std::wstring& agentName);
+    static bool DetectAgentCommand(const std::wstring& commandLine,
+                                   std::wstring& agentName);
 
 private:
     static std::wstring NormalizeDir(const std::wstring& dir);

@@ -1,6 +1,7 @@
 #pragma once
 #include "pane/pane_session.h"
 #include "pty/conpty.h"
+#include "resume_manager.h"
 #include "terminal/parser.h"
 #include <string>
 #include <queue>
@@ -42,11 +43,19 @@ public:
 
 private:
     void FlushPendingInput();
+    void TrackInput(const char* data, size_t len);
+    void HandleSubmittedCommand();
+    void UpdateResumeOnAgentExit(bool promptVisible, const std::wstring& promptPath);
 
     ConPty m_pty;
     TerminalBuffer m_buffer;
     VtParser m_parser;
+    ResumeManager m_resumeManager;
 
     std::mutex m_pendingInputMutex;
     std::queue<std::string> m_pendingInput;
+    std::wstring m_currentInputLine;
+    bool m_agentRunning = false;
+    std::wstring m_runningAgentName;
+    std::wstring m_agentWorkingDirectory;
 };

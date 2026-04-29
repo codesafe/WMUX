@@ -1489,16 +1489,6 @@ void App::OnPtyOutput(WPARAM wParam, LPARAM lParam) {
 
     pane->ProcessOutput();
 
-    // Scan for resume commands in output
-    {
-        std::wstring agentName, resumeCmd;
-        if (ResumeManager::ScanForResumeCommand(pane->GetBuffer(), agentName, resumeCmd)) {
-            std::wstring cwd = pane->GetWorkingDirectory();
-            if (!cwd.empty())
-                m_resumeManager.SaveResume(cwd, agentName, resumeCmd);
-        }
-    }
-
     InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
