@@ -41,6 +41,10 @@ private:
     void OnMouseMove(int x, int y);
     void OnLButtonUp();
     void OnRButtonUp(int x, int y);
+    // Mouse tracking (xterm mouse reporting). baseButton: 0/1/2=L/M/R, 64/65=wheel up/down.
+    // Returns true if the event was reported to the app (and native handling should be skipped).
+    bool SendMouseReport(int x, int y, int baseButton, bool release, bool motion);
+    void SendMouseSequence(IPaneSession* pane, int cb, int col, int row, bool release);
     void OnPtyOutput(WPARAM wParam, LPARAM lParam);
     void OnDpiChanged(UINT dpi, const RECT& suggestedRect);
     bool AttachExternalSession(const std::wstring& sessionId, int zone);
@@ -108,6 +112,10 @@ private:
     bool m_draggingSeparator = false;
     SplitNode* m_dragSplitNode = nullptr;
     int m_dragStartX = 0, m_dragStartY = 0;
+
+    // Mouse reporting state: left button press was forwarded to the app,
+    // so its subsequent motion/release must also be forwarded.
+    bool m_mouseReportLBtnDown = false;
 
     // Text selection state
     bool m_selecting = false;

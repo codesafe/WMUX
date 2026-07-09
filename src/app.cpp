@@ -426,6 +426,12 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         int mx = static_cast<int>(static_cast<short>(LOWORD(lParam)));
         int my = static_cast<int>(static_cast<short>(HIWORD(lParam)));
 
+        if (m_mouseReportLBtnDown) {
+            // Report drag motion to the application (button-event/any-event modes).
+            SendMouseReport(mx, my, 0, false, true);
+            return 0;
+        }
+
         if (m_draggingPane || m_draggingHelpScrollbar || m_draggingSeparator || m_draggingScrollbar || m_selecting) {
             OnMouseMove(mx, my);
         } else {
@@ -467,6 +473,15 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_LBUTTONUP:
         RegisterUserActivity();
+        if (m_mouseReportLBtnDown) {
+            int mx = static_cast<int>(static_cast<short>(LOWORD(lParam)));
+            int my = static_cast<int>(static_cast<short>(HIWORD(lParam)));
+            SendMouseReport(mx, my, 0, true, false);
+            m_mouseReportLBtnDown = false;
+            if (GetCapture() == m_hwnd)
+                ReleaseCapture();
+            return 0;
+        }
         if (m_draggingPane || m_draggingHelpScrollbar || m_draggingSeparator || m_draggingScrollbar || m_selecting)
             OnLButtonUp();
         return 0;
@@ -1268,29 +1283,39 @@ bool App::OnKeyDown(WPARAM vk, LPARAM flags) {
     std::string seq;
     bool appCur = active->GetBuffer().IsAppCursorKeys();
 
+    // xterm modifier parameter: 1 + shift(1) + alt(2) + ctrl(4).
+    // When a modifier is held (mod > 1), keys use the extended CSI form so the
+    // app can distinguish e.g. Ctrl+End (ESC[1;5F) from plain End (ESC[F).
+    int mod = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0);
+    std::string m = std::to_string(mod);
+    bool modified = mod > 1;
+
     switch (key) {
-    case VK_UP:     seq = appCur ? "\x1bOA" : "\x1b[A"; break;
-    case VK_DOWN:   seq = appCur ? "\x1bOB" : "\x1b[B"; break;
-    case VK_RIGHT:  seq = appCur ? "\x1bOC" : "\x1b[C"; break;
-    case VK_LEFT:   seq = appCur ? "\x1bOD" : "\x1b[D"; break;
-    case VK_HOME:   seq = "\x1b[H"; break;
-    case VK_END:    seq = "\x1b[F"; break;
-    case VK_INSERT: seq = "\x1b[2~"; break;
-    case VK_DELETE: seq = "\x1b[3~"; break;
-    case VK_PRIOR:  seq = "\x1b[5~"; break;
-    case VK_NEXT:   seq = "\x1b[6~"; break;
-    case VK_F1:     seq = "\x1bOP"; break;
-    case VK_F2:     seq = "\x1bOQ"; break;
-    case VK_F3:     seq = "\x1bOR"; break;
-    case VK_F4:     seq = "\x1bOS"; break;
-    case VK_F5:     seq = "\x1b[15~"; break;
-    case VK_F6:     seq = "\x1b[17~"; break;
-    case VK_F7:     seq = "\x1b[18~"; break;
-    case VK_F8:     seq = "\x1b[19~"; break;
-    case VK_F9:     seq = "\x1b[20~"; break;
-    case VK_F10:    seq = "\x1b[21~"; break;
-    case VK_F11:    seq = "\x1b[23~"; break;
-    case VK_F12:    seq = "\x1b[24~"; break;
+    // Cursor / Home / End (letter-final)
+    case VK_UP:     seq = modified ? "\x1b[1;" + m + "A" : (appCur ? "\x1bOA" : "\x1b[A"); break;
+    case VK_DOWN:   seq = modified ? "\x1b[1;" + m + "B" : (appCur ? "\x1bOB" : "\x1b[B"); break;
+    case VK_RIGHT:  seq = modified ? "\x1b[1;" + m + "C" : (appCur ? "\x1bOC" : "\x1b[C"); break;
+    case VK_LEFT:   seq = modified ? "\x1b[1;" + m + "D" : (appCur ? "\x1bOD" : "\x1b[D"); break;
+    case VK_HOME:   seq = modified ? "\x1b[1;" + m + "H" : "\x1b[H"; break;
+    case VK_END:    seq = modified ? "\x1b[1;" + m + "F" : "\x1b[F"; break;
+    // Editing / paging (tilde-final)
+    case VK_INSERT: seq = modified ? "\x1b[2;" + m + "~" : "\x1b[2~"; break;
+    case VK_DELETE: seq = modified ? "\x1b[3;" + m + "~" : "\x1b[3~"; break;
+    case VK_PRIOR:  seq = modified ? "\x1b[5;" + m + "~" : "\x1b[5~"; break;
+    case VK_NEXT:   seq = modified ? "\x1b[6;" + m + "~" : "\x1b[6~"; break;
+    // Function keys
+    case VK_F1:     seq = modified ? "\x1b[1;" + m + "P" : "\x1bOP"; break;
+    case VK_F2:     seq = modified ? "\x1b[1;" + m + "Q" : "\x1bOQ"; break;
+    case VK_F3:     seq = modified ? "\x1b[1;" + m + "R" : "\x1bOR"; break;
+    case VK_F4:     seq = modified ? "\x1b[1;" + m + "S" : "\x1bOS"; break;
+    case VK_F5:     seq = modified ? "\x1b[15;" + m + "~" : "\x1b[15~"; break;
+    case VK_F6:     seq = modified ? "\x1b[17;" + m + "~" : "\x1b[17~"; break;
+    case VK_F7:     seq = modified ? "\x1b[18;" + m + "~" : "\x1b[18~"; break;
+    case VK_F8:     seq = modified ? "\x1b[19;" + m + "~" : "\x1b[19~"; break;
+    case VK_F9:     seq = modified ? "\x1b[20;" + m + "~" : "\x1b[20~"; break;
+    case VK_F10:    seq = modified ? "\x1b[21;" + m + "~" : "\x1b[21~"; break;
+    case VK_F11:    seq = modified ? "\x1b[23;" + m + "~" : "\x1b[23~"; break;
+    case VK_F12:    seq = modified ? "\x1b[24;" + m + "~" : "\x1b[24~"; break;
     default: return false;
     }
 
@@ -1541,10 +1566,33 @@ void App::OnMouseWheel(WPARAM wParam, LPARAM lParam) {
         lines = static_cast<int>(linesPerNotch) * (steps > 0 ? steps : -steps);
     }
 
+    TerminalBuffer& buf = pane->GetBuffer();
+    bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
+    if (!shift && buf.IsMouseReporting()) {
+        // Forward the wheel to the application as mouse wheel events so it can
+        // scroll its own content (Claude plan mode, less, vim, htop, ...).
+        int cb = (steps > 0) ? 64 : 65; // 64 = wheel up, 65 = wheel down
+        for (int i = 0; i < lines; i++)
+            SendMouseReport(pt.x, pt.y, cb, false, false);
+        return;
+    }
+
+    if (!shift && buf.IsAltScreen()) {
+        // Alternate scroll: full-screen app without mouse reporting — translate
+        // the wheel into arrow keys (xterm alternateScroll / tmux alternate-scroll).
+        std::string seq = buf.IsAppCursorKeys()
+            ? (steps > 0 ? "\x1bOA" : "\x1bOB")
+            : (steps > 0 ? "\x1b[A" : "\x1b[B");
+        for (int i = 0; i < lines; i++)
+            pane->SendInput(seq);
+        return;
+    }
+
     if (steps > 0)
-        pane->GetBuffer().ScrollBack(lines);
+        buf.ScrollBack(lines);
     else
-        pane->GetBuffer().ScrollForward(lines);
+        buf.ScrollForward(lines);
 
     InvalidateRect(m_hwnd, nullptr, FALSE);
 }
@@ -1804,6 +1852,65 @@ void App::MouseToCell(int mx, int my, IPaneSession* pane, D2D1_RECT_F rect, int&
     }
 }
 
+// Encode a single mouse event and send it to the pane's application.
+// cb already includes button number + motion/modifier bits. col/row are 0-based
+// on-screen cells; reports use 1-based coordinates.
+void App::SendMouseSequence(IPaneSession* pane, int cb, int col, int row, bool release) {
+    if (!pane) return;
+    int col1 = col + 1;
+    int row1 = row + 1;
+    std::string seq;
+    if (pane->GetBuffer().IsMouseSgr()) {
+        // SGR (1006): ESC [ < Cb ; Cx ; Cy (M=press / m=release)
+        seq = "\x1b[<" + std::to_string(cb) + ";" +
+              std::to_string(col1) + ";" + std::to_string(row1) +
+              (release ? "m" : "M");
+    } else {
+        // Legacy (1000): ESC [ M <Cb+32> <Cx+32> <Cy+32>; release => button bits = 3
+        int b = release ? ((cb & ~0x3) | 0x3) : cb;
+        int vb = b + 32;
+        int vx = col1 + 32;
+        int vy = row1 + 32;
+        if (vb > 255) vb = 255;
+        if (vx > 255) vx = 255;
+        if (vy > 255) vy = 255;
+        char m[6] = { 0x1b, '[', 'M',
+                      static_cast<char>(vb), static_cast<char>(vx), static_cast<char>(vy) };
+        seq.assign(m, 6);
+    }
+    pane->SendInput(seq);
+}
+
+// Resolve the pane under (x,y) and, if it has mouse reporting enabled, forward
+// the event. Holding Shift bypasses reporting so native wmux gestures still work.
+bool App::SendMouseReport(int x, int y, int baseButton, bool release, bool motion) {
+    if (GetAsyncKeyState(VK_SHIFT) & 0x8000)
+        return false; // Shift bypass: keep native selection/scroll/pane-drag
+
+    IPaneSession* pane = nullptr;
+    D2D1_RECT_F rect = {};
+    if (!m_paneManager.FindPaneAndRectAtPoint(
+            static_cast<float>(x), static_cast<float>(y), pane, rect))
+        return false;
+    if (!pane || !pane->GetBuffer().IsMouseReporting())
+        return false;
+
+    // Motion is only reported in button-event (1002) or any-event (1003) modes.
+    MouseTrack track = pane->GetBuffer().GetMouseTrack();
+    if (motion && track != MouseTrack::Button && track != MouseTrack::Any)
+        return false;
+
+    int cb = baseButton;
+    if (motion) cb += 32;
+    if (GetAsyncKeyState(VK_MENU) & 0x8000)    cb += 8;   // Alt/Meta
+    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) cb += 16;  // Ctrl
+
+    int row = 0, col = 0;
+    MouseToCell(x, y, pane, rect, row, col);
+    SendMouseSequence(pane, cb, col, row, release);
+    return true;
+}
+
 // 0=whitespace/control, 1=ASCII word, 2=Hangul, 3=CJK, 4=delimiter/symbol
 static int CharClass(wchar_t ch) {
     if (ch <= L' ') return 0;
@@ -2020,6 +2127,15 @@ void App::OnLButtonDown(int x, int y) {
             static_cast<float>(x), static_cast<float>(y), pane, rect)) {
         // Activate clicked pane
         m_paneManager.SetActivePane(pane);
+
+        if (!shift && pane->GetBuffer().IsMouseReporting()) {
+            // Forward the click to the application instead of selecting text.
+            m_mouseReportLBtnDown = true;
+            SendMouseReport(x, y, 0, false, false);
+            SetCapture(m_hwnd);
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+            return;
+        }
 
         if (shift) {
             // Start pane drag
@@ -2303,6 +2419,7 @@ void App::CancelMouseOperation() {
     m_draggingScrollbar = false;
     m_dragPane = nullptr;
     m_selecting = false;
+    m_mouseReportLBtnDown = false;
 
     if (GetCapture() == m_hwnd)
         ReleaseCapture();

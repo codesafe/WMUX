@@ -46,6 +46,15 @@ struct Cell {
     uint8_t width = 1;  // 1=normal, 2=wide char lead, 0=wide char trail
 };
 
+// Mouse tracking (DECSET) mode requested by the application.
+enum class MouseTrack {
+    Off,
+    X10    = 9,      // press-only
+    Normal = 1000,   // press + release
+    Button = 1002,   // press + release + drag (motion while button down)
+    Any    = 1003,   // press + release + all motion
+};
+
 struct TerminalBufferSnapshot {
     std::vector<Cell> cells;
     int cols = 0;
@@ -59,6 +68,8 @@ struct TerminalBufferSnapshot {
     bool cursorVisible = true;
     bool appCursorKeys = false;
     bool bracketedPaste = false;
+    MouseTrack mouseTrack = MouseTrack::Off;
+    bool mouseSgr = false;
     std::string title;
     int savedCursorRow = 0;
     int savedCursorCol = 0;
@@ -88,6 +99,12 @@ public:
     bool IsCursorVisible() const { return m_cursorVisible; }
     bool IsAppCursorKeys() const { return m_appCursorKeys; }
     bool IsBracketedPaste() const { return m_bracketedPaste; }
+
+    // Mouse tracking
+    MouseTrack GetMouseTrack() const { return m_mouseTrack; }
+    bool IsMouseReporting() const { return m_mouseTrack != MouseTrack::Off; }
+    bool IsMouseSgr() const { return m_mouseSgr; }
+    bool IsAltScreen() const { return m_altScreenActive; }
 
     void SetTitle(const std::string& title) { m_title = title; }
     const std::string& GetTitle() const { return m_title; }
@@ -202,6 +219,8 @@ private:
     bool m_cursorVisible = true;
     bool m_appCursorKeys = false;
     bool m_bracketedPaste = false;
+    MouseTrack m_mouseTrack = MouseTrack::Off;
+    bool m_mouseSgr = false;
     bool m_autoWrap = true;
     bool m_originMode = false;
     std::string m_title;

@@ -1,9 +1,41 @@
 #include "terminal/parser.h"
 #include "terminal/buffer.h"
 
+#ifdef WMUX_PTY_TRACE
+#include <cstdio>
+#include <mutex>
+// Diagnostic-only: dump raw PTY bytes with control chars visualized so we can
+// identify which scroll/redraw sequences Claude CLI emits (DECSTBM `CSI r`,
+// InsertLines/DeleteLines `CSI L`/`CSI M`, or ConPTY CUP+overwrite repaints).
+// Enable by defining WMUX_PTY_TRACE for a Debug build. Output: wmux_pty_trace.log
+static void PtyTrace(const char* data, size_t len) {
+    static std::mutex traceMutex;
+    std::lock_guard<std::mutex> lock(traceMutex);
+    FILE* f = nullptr;
+    if (fopen_s(&f, "wmux_pty_trace.log", "ab") != 0 || !f) return;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t b = static_cast<uint8_t>(data[i]);
+        if (b == 0x1B)
+            std::fputs("<ESC>", f);            // start of an escape sequence
+        else if (b == 0x0A)
+            std::fputs("<LF>\n", f);           // line feed (real scroll candidate)
+        else if (b == 0x0D)
+            std::fputs("<CR>", f);
+        else if (b < 0x20 || b == 0x7F)
+            std::fprintf(f, "<%02X>", b);      // other control bytes
+        else
+            std::fputc(static_cast<int>(b), f);
+    }
+    std::fclose(f);
+}
+#endif
+
 VtParser::VtParser(TerminalBuffer& buffer) : m_buffer(buffer) {}
 
 void VtParser::ProcessBytes(const char* data, size_t len) {
+#ifdef WMUX_PTY_TRACE
+    PtyTrace(data, len);
+#endif
     for (size_t i = 0; i < len; i++)
         ProcessByte(static_cast<uint8_t>(data[i]));
 }

@@ -270,6 +270,8 @@ std::vector<uint8_t> BuildSnapshotPayload(const TerminalBufferSnapshot& snapshot
     AppendPod(payload, snapshot.cursorVisible);
     AppendPod(payload, snapshot.appCursorKeys);
     AppendPod(payload, snapshot.bracketedPaste);
+    AppendPod(payload, snapshot.mouseTrack);
+    AppendPod(payload, snapshot.mouseSgr);
     AppendString8(payload, snapshot.title);
     AppendPod(payload, snapshot.savedCursorRow);
     AppendPod(payload, snapshot.savedCursorCol);
@@ -305,6 +307,8 @@ bool ParseSnapshotPayload(const std::vector<uint8_t>& payload,
     if (!ReadPod(payload, offset, snapshot.cursorVisible)) return false;
     if (!ReadPod(payload, offset, snapshot.appCursorKeys)) return false;
     if (!ReadPod(payload, offset, snapshot.bracketedPaste)) return false;
+    if (!ReadPod(payload, offset, snapshot.mouseTrack)) return false;
+    if (!ReadPod(payload, offset, snapshot.mouseSgr)) return false;
     if (!ReadString8(payload, offset, snapshot.title)) return false;
     if (!ReadPod(payload, offset, snapshot.savedCursorRow)) return false;
     if (!ReadPod(payload, offset, snapshot.savedCursorCol)) return false;

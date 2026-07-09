@@ -36,6 +36,8 @@ TerminalBufferSnapshot TerminalBuffer::CreateSnapshot() const {
     snapshot.cursorVisible = m_cursorVisible;
     snapshot.appCursorKeys = m_appCursorKeys;
     snapshot.bracketedPaste = m_bracketedPaste;
+    snapshot.mouseTrack = m_mouseTrack;
+    snapshot.mouseSgr = m_mouseSgr;
     snapshot.title = m_title;
     snapshot.savedCursorRow = m_savedCursorRow;
     snapshot.savedCursorCol = m_savedCursorCol;
@@ -65,6 +67,8 @@ void TerminalBuffer::LoadSnapshot(const TerminalBufferSnapshot& snapshot) {
     m_cursorVisible = snapshot.cursorVisible;
     m_appCursorKeys = snapshot.appCursorKeys;
     m_bracketedPaste = snapshot.bracketedPaste;
+    m_mouseTrack = snapshot.mouseTrack;
+    m_mouseSgr = snapshot.mouseSgr;
     m_title = snapshot.title;
     m_savedCursorRow = snapshot.savedCursorRow;
     m_savedCursorCol = snapshot.savedCursorCol;
@@ -694,6 +698,25 @@ void TerminalBuffer::SetMode(int mode, bool enabled) {
     case 25:
         m_cursorVisible = enabled;
         break;
+    case 9:    // X10 mouse reporting (press only)
+        m_mouseTrack = enabled ? MouseTrack::X10 : MouseTrack::Off;
+        break;
+    case 1000: // Normal mouse tracking (press + release)
+        m_mouseTrack = enabled ? MouseTrack::Normal : MouseTrack::Off;
+        break;
+    case 1002: // Button-event tracking (press + release + drag)
+        m_mouseTrack = enabled ? MouseTrack::Button : MouseTrack::Off;
+        break;
+    case 1003: // Any-event tracking (press + release + all motion)
+        m_mouseTrack = enabled ? MouseTrack::Any : MouseTrack::Off;
+        break;
+    case 1005: // UTF-8 mouse encoding: not supported, accepted silently
+        break;
+    case 1006: // SGR extended mouse encoding
+        m_mouseSgr = enabled;
+        break;
+    case 1015: // urxvt mouse encoding: not supported, accepted silently
+        break;
     case 1047:
         if (enabled && !m_altScreenActive) {
             m_savedMainBuffer = m_cells;
@@ -748,6 +771,8 @@ void TerminalBuffer::FullReset() {
     m_cursorVisible = true;
     m_appCursorKeys = false;
     m_bracketedPaste = false;
+    m_mouseTrack = MouseTrack::Off;
+    m_mouseSgr = false;
     m_autoWrap = true;
     m_originMode = false;
     m_savedCursorRow = 0;
