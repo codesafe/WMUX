@@ -808,7 +808,18 @@ void TerminalBuffer::ClearLine(int row) {
 }
 
 void TerminalBuffer::ClearCell(Cell& cell) {
-    cell = Cell{};
+    cell = MakeBlankCell();
+}
+
+Cell TerminalBuffer::MakeBlankCell() const {
+    // BCE: 공백 글자 + 기본 전경, 배경만 현재 SGR 속성(m_attr)에서 승계.
+    // 텍스트 장식/inverse flags는 제거(inverse가 남으면 blank가 전경색으로 칠해짐).
+    Cell cell;                                        // ' ', fg 기본, width=1
+    cell.flags = CELL_FG_DEFAULT;
+    cell.flags |= (m_attr.flags & (CELL_BG_RGB | CELL_BG_DEFAULT));
+    cell.bg    = m_attr.bg;
+    cell.bgRgb = m_attr.bgRgb;
+    return cell;                                      // flags2=0 → dim/strike/blink/밑줄스타일 제거
 }
 
 void TerminalBuffer::ClampCursor() {

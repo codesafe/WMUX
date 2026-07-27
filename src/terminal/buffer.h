@@ -200,6 +200,8 @@ public:
 private:
     void ClearLine(int row);
     void ClearCell(Cell& cell);
+    // BCE(Background Color Erase): 현재 SGR 배경을 승계한 공백 셀 생성
+    Cell MakeBlankCell() const;
     void ClampCursor();
     void InitTabStops();
 

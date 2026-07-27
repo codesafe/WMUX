@@ -1010,19 +1010,14 @@ bool App::OnKeyDown(WPARAM vk, LPARAM flags) {
         bool forward = (key == VK_RIGHT || key == VK_DOWN);
 
         if (shift) {
-            // Alt+Shift+Arrow: Swap content
+            // Alt+Shift+Arrow: Swap content. Relayout so the swapped buffer/ConPTY
+            // reflow to the (possibly different-sized) target pane rect.
             m_paneManager.SwapPaneContent(dir, forward);
         } else {
             // Alt+Arrow: Move pane (requires relayout after tree restructuring)
             m_paneManager.MovePane(dir, forward);
-            RECT rc;
-            GetClientRect(m_hwnd, &rc);
-            float statusH = m_renderer.GetStatusBarHeight();
-            float paneH = static_cast<float>(rc.bottom) - statusH;
-            D2D1_RECT_F paneRect = {0, 0, static_cast<float>(rc.right), paneH};
-            m_paneManager.Relayout(paneRect, m_renderer.GetCellWidth(),
-                                   m_renderer.GetCellHeight());
         }
+        RelayoutPanes();
         InvalidateRect(m_hwnd, nullptr, FALSE);
         return true;
     }
