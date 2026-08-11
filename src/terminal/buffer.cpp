@@ -130,24 +130,48 @@ void TerminalBuffer::Resize(int newCols, int newRows) {
         }
     }
 
+    // grow 시 스크롤백을 상단으로 끌어와 내용을 하단 앵커(실제 터미널 동작).
+    // (alt-screen은 스크롤백을 쓰지 않으므로 기존대로 상단 고정. shrink는 topOffset=0)
+    int topOffset = 0;
+    if (newRows > m_rows && !m_altScreenActive) {
+        int grow = newRows - m_rows;
+        topOffset = (std::min)(static_cast<int>(m_scrollback.size()), grow);
+    }
+
     std::vector<Cell> newCells(static_cast<size_t>(newCols) * newRows, Cell{});
-    int copyRows = (std::min)(m_rows, newRows);
     int copyCols = (std::min)(m_cols, newCols);
 
+    // 1) 스크롤백 뒤쪽 topOffset개 줄을 상단에 복원
+    for (int i = 0; i < topOffset; i++) {
+        const std::vector<Cell>& sb = m_scrollback[m_scrollback.size() - topOffset + i];
+        int cc = (std::min)(static_cast<int>(sb.size()), newCols);
+        for (int c = 0; c < cc; c++)
+            newCells[i * newCols + c] = sb[c];
+    }
+
+    // 2) 기존 내용을 topOffset만큼 아래로 shift 복사
+    int copyRows = (std::min)(m_rows, newRows);
+    if (topOffset + copyRows > newRows) copyRows = newRows - topOffset;   // 안전 클램프(grow에선 no-op)
     for (int r = 0; r < copyRows; r++) {
         for (int c = 0; c < copyCols; c++) {
-            newCells[r * newCols + c] = m_cells[r * m_cols + c];
+            newCells[(r + topOffset) * newCols + c] = m_cells[r * m_cols + c];
         }
     }
+
+    // 3) 복원한 줄은 스크롤백에서 제거
+    for (int i = 0; i < topOffset; i++)
+        m_scrollback.pop_back();
 
     m_cells = std::move(newCells);
     m_cols = newCols;
     m_rows = newRows;
-    m_cursorRow = (std::min)(m_cursorRow, m_rows - 1);
+    m_cursorRow = (std::min)(m_cursorRow + topOffset, m_rows - 1);
     m_cursorCol = (std::min)(m_cursorCol, m_cols - 1);
+    m_savedCursorRow = (std::min)(m_savedCursorRow + topOffset, m_rows - 1);
     m_scrollTop = 0;
     m_scrollBottom = m_rows - 1;
     m_wrapPending = false;
+    m_scrollOffset = (std::min)(m_scrollOffset, static_cast<int>(m_scrollback.size()));  // 스크롤 중 리사이즈 안전
 
     if (m_altScreenActive) {
         m_savedMainBuffer.resize(static_cast<size_t>(newCols) * newRows, Cell{});
