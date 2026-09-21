@@ -48,9 +48,6 @@ public:
     void RenderDropZone(D2D1_RECT_F rect, int zone);
     void RenderMatrixEffect(uint32_t frame);
     void ResetMatrixEffect();
-    void RenderResumePrompt(D2D1_RECT_F paneRect,
-                            const std::wstring& agentName,
-                            const std::wstring& resumeCmd);
     void EndFrame();
 
     float GetStatusBarHeight() const { return m_cellHeight + 4.0f; }

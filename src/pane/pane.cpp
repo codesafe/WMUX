@@ -108,9 +108,6 @@ void Pane::ProcessOutput() {
     if (!data.empty()) {
         m_parser.ProcessBytes(data.c_str(), data.size());
         RefreshWorkingDirectory();
-        std::wstring promptPath;
-        bool promptVisible = TryGetPromptPath(m_buffer, promptPath);
-        UpdateResumeOnAgentExit(promptVisible, promptPath);
 
         // Flush pending input when pane becomes ready
         if (m_pty.IsReady()) {
@@ -120,7 +117,6 @@ void Pane::ProcessOutput() {
 }
 
 void Pane::SendInput(const char* data, size_t len) {
-    TrackInput(data, len);
     if (!m_pty.IsReady()) {
         std::lock_guard<std::mutex> lock(m_pendingInputMutex);
         m_pendingInput.push(std::string(data, len));
@@ -130,7 +126,6 @@ void Pane::SendInput(const char* data, size_t len) {
 }
 
 void Pane::SendInput(const std::string& data) {
-    TrackInput(data.c_str(), data.size());
     if (!m_pty.IsReady()) {
         std::lock_guard<std::mutex> lock(m_pendingInputMutex);
         m_pendingInput.push(data);
@@ -172,49 +167,3 @@ void Pane::RefreshWorkingDirectory() {
     m_pty.RefreshWorkingDirectory();
 }
 
-void Pane::TrackInput(const char* data, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        unsigned char ch = static_cast<unsigned char>(data[i]);
-        if (ch == '\r' || ch == '\n') {
-            HandleSubmittedCommand();
-            m_currentInputLine.clear();
-        } else if (ch == 0x7f || ch == 0x08) {
-            if (!m_currentInputLine.empty())
-                m_currentInputLine.pop_back();
-        } else if (ch == 0x03) {
-            m_currentInputLine.clear();
-        } else if (ch >= 0x20 && ch < 0x7f) {
-            m_currentInputLine += static_cast<wchar_t>(ch);
-        }
-    }
-}
-
-void Pane::HandleSubmittedCommand() {
-    std::wstring agentName;
-    if (!ResumeManager::DetectAgentCommand(m_currentInputLine, agentName))
-        return;
-
-    m_agentRunning = true;
-    m_runningAgentName = std::move(agentName);
-    m_agentWorkingDirectory = m_pty.GetWorkingDirectory();
-}
-
-void Pane::UpdateResumeOnAgentExit(bool promptVisible, const std::wstring& promptPath) {
-    if (!m_agentRunning || !promptVisible)
-        return;
-
-    std::wstring agentName;
-    std::wstring resumeCmd;
-    if (ResumeManager::ScanForResumeCommand(m_buffer, agentName, resumeCmd) &&
-        agentName == m_runningAgentName) {
-        std::wstring cwd = m_agentWorkingDirectory;
-        if (cwd.empty())
-            cwd = promptPath;
-        if (!cwd.empty())
-            m_resumeManager.SaveResume(cwd, agentName, resumeCmd);
-    }
-
-    m_agentRunning = false;
-    m_runningAgentName.clear();
-    m_agentWorkingDirectory.clear();
-}
