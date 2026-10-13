@@ -145,6 +145,7 @@ private:
     // IME composition state
     bool m_imeComposing = false;
     std::wstring m_imeCompStr;
+    void UpdateImeWindowPosition();
 
     // Pane drag state
     bool m_draggingPane = false;

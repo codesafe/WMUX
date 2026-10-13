@@ -808,44 +808,55 @@ void DxRenderer::RenderPane(const TerminalBuffer& buffer, D2D1_RECT_F rect,
         }
     }
 
-    // IME composition floating box
-    if (ime && ime->composing && !ime->compStr.empty()) {
-        int imeWidth = 0;
-        for (wchar_t wc : ime->compStr) {
-            imeWidth += (wc >= 0x1100 && wc <= 0x115F) || (wc >= 0xAC00 && wc <= 0xD7A3) ||
-                        (wc >= 0x2E80 && wc <= 0x9FFF) || (wc >= 0xF900 && wc <= 0xFAFF) ? 2 : 1;
+    // IME composition: draw the composing text inline at the cursor cell, on the
+    // cell grid with the same font as regular text (instead of a separate box),
+    // and underline it to mark it as not yet committed.
+    if (ime && ime->composing && !ime->compStr.empty() && !useViewAt &&
+        cursorRow >= 0 && cursorRow < rows) {
+        const std::wstring& comp = ime->compStr;
+        auto charWidth = [](wchar_t wc) {
+            return ((wc >= 0x1100 && wc <= 0x115F) || (wc >= 0x3130 && wc <= 0x318F) ||
+                    (wc >= 0xAC00 && wc <= 0xD7A3) || (wc >= 0x2E80 && wc <= 0x9FFF) ||
+                    (wc >= 0xF900 && wc <= 0xFAFF) || (wc >= 0xFF00 && wc <= 0xFF60)) ? 2 : 1;
+        };
+        int compCols = 0;
+        for (size_t i = 0; i < comp.size(); i++) {
+            if (IS_LOW_SURROGATE(comp[i])) continue;
+            compCols += charWidth(comp[i]);
         }
 
-        float padH = 6.0f, padW = 10.0f;
-        float iw = imeWidth * m_cellWidth + padW * 2;
-        float ih = m_cellHeight + padH * 2;
+        // Keep the composition inside the row (shift left at the right edge)
+        int startCol = cursorCol;
+        if (startCol + compCols > cols) startCol = cols - compCols;
+        if (startCol < 0) startCol = 0;
 
-        float ix = contentRect.right - iw - 4.0f;
-        float iy = contentRect.bottom - ih - 4.0f;
+        float y  = floorf(contentRect.top + cursorRow * m_cellHeight);
+        float y2 = floorf(contentRect.top + (cursorRow + 1) * m_cellHeight);
+        float x0 = floorf(contentRect.left + startCol * m_cellWidth);
+        float x1 = floorf(contentRect.left + (startCol + compCols) * m_cellWidth);
+        if (x1 > contentRect.right) x1 = contentRect.right;
 
-        if (ix < contentRect.left)
-            ix = contentRect.left;
-        if (iy < contentRect.top)
-            iy = contentRect.top;
+        m_pBrush->SetColor(m_defaultBg);
+        m_pRenderTarget->FillRectangle({x0, y, x1, y2}, m_pBrush.Get());
 
-        D2D1_RECT_F boxRect = {ix, iy, ix + iw, iy + ih};
-
-        m_pBrush->SetColor(D2D1::ColorF(0.06f, 0.06f, 0.12f, 0.95f));
-        m_pRenderTarget->FillRectangle(boxRect, m_pBrush.Get());
-
-        m_pBrush->SetColor(D2D1::ColorF(0x16C60C, 0.8f));
-        m_pRenderTarget->DrawRectangle(boxRect, m_pBrush.Get(), 1.5f);
-
-        D2D1_RECT_F textRect = {ix + padW, iy + padH, ix + iw - padW, iy + ih - padH};
         m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        m_pBrush->SetColor(D2D1::ColorF(0xE8E8E8));
-        m_pRenderTarget->DrawText(ime->compStr.c_str(), static_cast<UINT32>(ime->compStr.size()),
-                                  m_pTextFormat.Get(), textRect, m_pBrush.Get(),
-                                  D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+        m_pBrush->SetColor(m_defaultFg);
+        int col = startCol;
+        for (size_t i = 0; i < comp.size(); ) {
+            UINT32 len = (IS_HIGH_SURROGATE(comp[i]) && i + 1 < comp.size()) ? 2 : 1;
+            int span = charWidth(comp[i]);
+            D2D1_RECT_F cellRect = {
+                floorf(contentRect.left + col * m_cellWidth), y,
+                floorf(contentRect.left + (col + span) * m_cellWidth), y2
+            };
+            m_pRenderTarget->DrawText(&comp[i], len, m_pTextFormat.Get(), cellRect, m_pBrush.Get(),
+                                      D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+            col += span;
+            i += len;
+        }
         m_pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
 
-        m_pBrush->SetColor(D2D1::ColorF(0x16C60C));
-        m_pRenderTarget->FillRectangle({ix + padW, iy + ih - padH - 2, ix + iw - padW, iy + ih - padH}, m_pBrush.Get());
+        m_pRenderTarget->FillRectangle({x0, y2 - 2, x1, y2}, m_pBrush.Get());
     }
 
     // Custom scrollbar overlay

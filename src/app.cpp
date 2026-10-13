@@ -306,7 +306,9 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
 
     case WM_IME_STARTCOMPOSITION:
-        // Prevent default IME composition window from appearing
+        // Prevent default IME composition window from appearing;
+        // the composing text is drawn inline at the cursor by RenderPane.
+        UpdateImeWindowPosition();
         return 0;
 
     case WM_IME_COMPOSITION:
@@ -383,6 +385,7 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                     m_imeComposing = true;
                     if (IPaneSession* ap = m_paneManager.GetActivePane())
                         ap->GetBuffer().ScrollToBottom();
+                    UpdateImeWindowPosition();
                 } else {
                     m_imeComposing = false;
                     m_imeCompStr.clear();
@@ -916,6 +919,44 @@ void App::OnPaint() {
     }
 
     m_renderer.EndFrame();
+}
+
+void App::UpdateImeWindowPosition() {
+    SplitNode* node = m_paneManager.GetActiveNode();
+    if (!node || !node->pane) return;
+
+    D2D1_RECT_F rect = node->rect;
+    if (m_paneManager.IsZoomed()) {
+        RECT rc;
+        GetClientRect(m_hwnd, &rc);
+        rect = {0, 0, static_cast<float>(rc.right),
+                static_cast<float>(rc.bottom) - m_renderer.GetStatusBarHeight()};
+    }
+
+    const float PANE_PADDING = 4.0f;
+    const TerminalBuffer& buffer = node->pane->GetBuffer();
+    float cellW = m_renderer.GetCellWidth();
+    float cellH = m_renderer.GetCellHeight();
+    LONG x = static_cast<LONG>(rect.left + PANE_PADDING + buffer.GetCursorCol() * cellW);
+    LONG y = static_cast<LONG>(rect.top + PANE_PADDING + buffer.GetCursorRow() * cellH);
+
+    HIMC hImc = ImmGetContext(m_hwnd);
+    if (!hImc) return;
+
+    // Composing text itself is drawn by us; still report the position so the
+    // candidate list (Hanja conversion etc.) appears right under the cursor.
+    COMPOSITIONFORM cf{};
+    cf.dwStyle = CFS_POINT;
+    cf.ptCurrentPos = {x, y};
+    ImmSetCompositionWindow(hImc, &cf);
+
+    CANDIDATEFORM cand{};
+    cand.dwIndex = 0;
+    cand.dwStyle = CFS_CANDIDATEPOS;
+    cand.ptCurrentPos = {x, static_cast<LONG>(y + cellH)};
+    ImmSetCandidateWindow(hImc, &cand);
+
+    ImmReleaseContext(m_hwnd, hImc);
 }
 
 void App::RelayoutPanes() {
